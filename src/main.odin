@@ -20,10 +20,16 @@ main :: proc() {
     
     buffer: [256] u8
     
+    command_allocator := context.temp_allocator
+    state_allocator := context.allocator
+    
     state: State
-    state.working_directory, _ = os.get_working_directory(context.allocator)
+    state.working_directory, _ = os.get_working_directory(state_allocator)
+    
     
     for !state.exit {
+        free_all(command_allocator)
+        
         fmt.printf("$ ")
         
         // @todo(viktor): read line, not read all
@@ -33,59 +39,9 @@ main :: proc() {
         }
         input := transmute(string) buffer[:read_bytes]
         
-        arguments_: [dynamic] string // @leak
-        parse_state: enum {
-            Default,
-            Single_Quote,
-        }
         
-        current: strings.Builder // @leak
-        skip_next: bool
-        for r, index in input {
-            if skip_next {
-                skip_next = false
-                continue
-            }
-            
-            switch parse_state {
-            case .Default:
-                if r == '\'' {
-                    if index+1 < len(input) && input[index+1] == '\'' {
-                        skip_next = true
-                    } else {
-                        if strings.builder_len(current) != 0 {
-                            append(&arguments_, strings.clone(strings.to_string(current), context.temp_allocator))
-                            strings.builder_reset(&current)
-                        }
-                        parse_state = .Single_Quote
-                    }
-                } else if strings.is_space(r) {
-                    if strings.builder_len(current) != 0 {
-                        append(&arguments_, strings.clone(strings.to_string(current), context.temp_allocator))
-                        strings.builder_reset(&current)
-                    }
-                } else {
-                    fmt.sbprintf(&current, "%v", r)
-                }
-                
-            case .Single_Quote:
-                if r == '\'' {
-                    if index+1 < len(input) && input[index+1] == '\'' {
-                        skip_next = true
-                    } else {
-                        if strings.builder_len(current) != 0 {
-                            append(&arguments_, strings.clone(strings.to_string(current), context.temp_allocator))
-                            strings.builder_reset(&current)
-                        }
-                        parse_state = .Default
-                    }
-                } else {
-                    fmt.sbprintf(&current, "%v", r)
-                }
-            }
-        }
         
-        arguments := arguments_[:]
+        arguments := parse_arguments(input, command_allocator)
         
         if len(arguments) == 0 do continue
         
@@ -105,15 +61,15 @@ main :: proc() {
             target := shift(&arguments)
             
             if target == "~" {
-                target, _ = os.user_home_dir(context.temp_allocator)
+                target, _ = os.user_home_dir(command_allocator)
             } else if !os.is_absolute_path(target) {
-                target, _ = os.join_path({state.working_directory, target}, context.temp_allocator)
+                target, _ = os.join_path({state.working_directory, target}, command_allocator)
             }
             
             if os.is_directory(target) {
-                next, _ := os.clean_path(target, context.allocator)
+                next, _ := os.clean_path(target, state_allocator)
                 
-                delete_string(state.working_directory)
+                delete_string(state.working_directory, state_allocator)
                 state.working_directory = next
             } else {
                 fmt.printf("cd: %v: No such file or directory\n", target)
@@ -156,7 +112,7 @@ main :: proc() {
                 description.command = exe_command[:]
                 description.working_dir = state.working_directory
                 
-                state, out_buffer, err_buffer, error := os.process_exec(description, context.temp_allocator)
+                state, out_buffer, err_buffer, error := os.process_exec(description, command_allocator)
                 out_string := transmute(string) out_buffer
                 fmt.printf("%v", out_string)
                 if error != nil {
@@ -168,6 +124,63 @@ main :: proc() {
             }
         }
     }
+}
+
+parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] string {
+    arguments := make([dynamic] string, allocator)
+    parse_state: enum {
+        Default,
+        Single_Quote,
+    }
+    
+    current:= strings.builder_make(allocator)
+    
+    skip_next: bool
+    for r, index in input {
+        if skip_next {
+            skip_next = false
+            continue
+        }
+        
+        switch parse_state {
+        case .Default:
+            if r == '\'' {
+                if index+1 < len(input) && input[index+1] == '\'' {
+                    skip_next = true
+                } else {
+                    if strings.builder_len(current) != 0 {
+                        append(&arguments, strings.clone(strings.to_string(current), allocator))
+                        strings.builder_reset(&current)
+                    }
+                    parse_state = .Single_Quote
+                }
+            } else if strings.is_space(r) {
+                if strings.builder_len(current) != 0 {
+                    append(&arguments, strings.clone(strings.to_string(current), allocator))
+                    strings.builder_reset(&current)
+                }
+            } else {
+                fmt.sbprintf(&current, "%v", r)
+            }
+            
+        case .Single_Quote:
+            if r == '\'' {
+                if index+1 < len(input) && input[index+1] == '\'' {
+                    skip_next = true
+                } else {
+                    if strings.builder_len(current) != 0 {
+                        append(&arguments, strings.clone(strings.to_string(current), allocator))
+                        strings.builder_reset(&current)
+                    }
+                    parse_state = .Default
+                }
+            } else {
+                fmt.sbprintf(&current, "%v", r)
+            }
+        }
+    }
+    
+    return arguments[:]
 }
 
 find_in_path :: proc (target: string) -> (string, bool) {
