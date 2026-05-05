@@ -134,9 +134,19 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
     current:= strings.builder_make(allocator)
     
     skip_next: bool
+    escape_next: bool
     for r, index in input {
         if skip_next {
             skip_next = false
+            continue
+        }
+        
+        if escape_next {
+            escape_next = false
+            switch r {
+            case:
+                fmt.sbprintf(&current, "%v", r)
+            }
             continue
         }
         
@@ -157,6 +167,8 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                     append_current = true
                     quote_kind = .Single
                 }
+            } else if r == '\\' {
+                escape_next = true
             } else if strings.is_space(r) {
                 append_current = true
             } else {
