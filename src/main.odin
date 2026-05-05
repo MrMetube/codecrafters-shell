@@ -64,22 +64,27 @@ main :: proc() {
         }
         
         if !handled {
-            exe_name := chop(&arguments, " ")
+            exe_name := command
+            fmt.eprintf("`%v`\n", exe_name)
             fullpath, found := find_in_path(exe_name)
+            fmt.eprintf("`%v` = %v\n", fullpath, found)
             if found {
                 exe_command: [dynamic] string
                 append(&exe_command, fullpath)
                 for arguments != "" {
                     append(&exe_command, chop(&arguments, " "))
                 }
+                fmt.eprintln(exe_command)
                 
                 description: os.Process_Desc
                 description.command = exe_command[:]
-                description.stdout = os.stdout
-                description.stderr = os.stderr
-                description.stdin  = os.stdin
+                // description.stdout = os.stdout
+                // description.stderr = os.stderr
+                // description.stdin  = os.stdin
                 
                 state, out_buffer, err_buffer, error := os.process_exec(description, context.temp_allocator)
+                out_string := transmute(string) out_buffer
+                fmt.printf("%v: %v", out_string, error)
                 assert(error == nil)
             } else {
                 fmt.printf("%v: command not found\n", command)
@@ -92,6 +97,7 @@ find_in_path :: proc (target: string) -> (string, bool) {
     path_variable := os.get_env("PATH", context.temp_allocator)
                 
     fullpath: string
+    ok: bool
     for path_variable != "" {
         path_separator :: ";" when ODIN_OS == .Windows else ":"
         
@@ -102,12 +108,13 @@ find_in_path :: proc (target: string) -> (string, bool) {
             for info in dir_info {
                 if (os.Permissions_Execute_All & info.mode != {}) && info.name == target {
                     fullpath = info.fullpath
+                    ok = true
                 }
             }
         }
     }
     
-    return fullpath, fullpath != ""
+    return fullpath, ok
 }
 
 is_command :: proc (builtins: ^[dynamic] string, handled: ^bool, command, input: string) -> bool {
@@ -125,8 +132,6 @@ is_command :: proc (builtins: ^[dynamic] string, handled: ^bool, command, input:
 chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok {
     head, match, tail := strings.partition(s^, separator)
     ok := match == separator
-    if ok {
-        s^ = tail
-    }
+    s^ = tail
     return head, ok
 }
