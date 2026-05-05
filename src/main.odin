@@ -18,7 +18,7 @@ State :: struct {
     builtins: [dynamic] string,
     
     last_used_job_id: int,
-    jobs: [Job_State] [dynamic] Job
+    jobs: [dynamic] Job
 }
 
 Input :: struct {
@@ -30,6 +30,7 @@ Input :: struct {
 Target :: enum { Out, Err }
 
 Job :: struct {
+    state: Job_State,
     id:   int,
     process: os.Process,
     command_line: string,
@@ -47,7 +48,7 @@ state_init :: proc (state: ^State) {
     state.working_directory, _ = os.get_working_directory(state.allocator)
     
     state.builtins = make([dynamic] string, state.allocator)
-    for &it in state.jobs do it = make([dynamic] Job, state.allocator)
+    state.jobs = make([dynamic] Job, state.allocator)
     
     clear(&state.builtins)
     dummy := strings.builder_make(context.temp_allocator)
@@ -147,15 +148,14 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
         fmt.sbprintf(output, "%v\n", state.working_directory)
     } else if is_command(state, "jobs", command) {
         high_job_ids: [2] int
-        #reverse for job, job_index in state.jobs[.Running] {
+        for &job in state.jobs {
             process_state, wait_error := os.process_wait(job.process, timeout = 0)
             if wait_error != nil && wait_error != .Timeout {
                 fmt.printfln("ERROR trying to wait on %v: %v", job.process.pid, wait_error)
             }
             
             if process_state.exited {
-                unordered_remove(&state.jobs[.Running], job_index)
-                append(&state.jobs[.Done], job)
+                job.state = .Done
             } else {
                 if job.id > high_job_ids[0] {
                     high_job_ids[1] = high_job_ids[0]
@@ -166,20 +166,19 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             }
         }
         
-        for job in state.jobs[.Done] {
+        for job in state.jobs {
             icon := " "
             if job.id == high_job_ids[0] { icon = "+" }
             if job.id == high_job_ids[1] { icon = "-" } 
-            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, Job_State.Done, job.command_line)
-        }
-        for job in state.jobs[.Running] {
-            icon := " "
-            if job.id == high_job_ids[0] { icon = "+" }
-            if job.id == high_job_ids[1] { icon = "-" } 
-            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, Job_State.Running, job.command_line)
+            
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, job.state, job.command_line)
         }
         
-        clear(&state.jobs[.Done])
+        #reverse for job, index in state.jobs {
+            if job.state == .Done {
+                unordered_remove(&state.jobs, index)
+            }
+        }
     } else if is_command(state, "type", command) {
         is_builtin := false
         
@@ -230,7 +229,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                 state.last_used_job_id += 1
                 id := state.last_used_job_id
                 
-                append(&state.jobs[.Running], Job{ id, process, strings.join(exe_command[:], " ", state.allocator) })
+                append(&state.jobs, Job{ .Running, id, process, strings.join(exe_command[:], " ", state.allocator) })
                 fmt.sbprintfln(output, "[%v] %v", id, process.pid)
             } else {
                 _, out_buffer, err_buffer, exec_error := os.process_exec(description, state.command_allocator)
