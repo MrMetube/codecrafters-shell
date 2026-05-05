@@ -171,7 +171,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             if job.id == high_job_ids[0] { icon = "+" }
             if job.id == high_job_ids[1] { icon = "-" } 
             
-            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, job.state, job.command_line)
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v &", job.id, icon, job.state, job.command_line)
         }
         
         
@@ -183,13 +183,8 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                 to += 1
             }
         }
-        shrink_dynamic_array(&state.jobs, new_cap = to)
-        
-        #reverse for job, index in state.jobs {
-            if job.state == .Done {
-                unordered_remove(&state.jobs, index)
-            }
-        }
+        raw := cast(^runtime.Raw_Dynamic_Array) &state.jobs
+        raw.len = to
     } else if is_command(state, "type", command) {
         is_builtin := false
         
