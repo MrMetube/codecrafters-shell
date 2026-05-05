@@ -5,6 +5,13 @@ import "core:io"
 import "core:os"
 import "core:strings"
 
+State :: struct {
+    cwd: string,
+    exit: bool,
+    
+    builtins: [dynamic] string,
+}
+
 main :: proc() {
     standart_in := os.to_reader(os.stdin)
     r, ok := io.to_read_write_closer(standart_in)
@@ -12,9 +19,10 @@ main :: proc() {
     
     buffer: [256] u8
     
-    loop := true
-    builtins: [dynamic] string
-    for loop {
+    state: State
+    state.cwd, _ = os.get_working_directory(context.allocator)
+    
+    for !state.exit {
         fmt.printf("$ ")
         
         // @todo(viktor): read line, not read all
@@ -27,21 +35,17 @@ main :: proc() {
         arguments := strings.trim_space(input)
         command   := chop(&arguments, " ")
         
-        handled := false
-        
-        clear(&builtins)
+        clear(&state.builtins)
 
-        if is_command(&builtins, &handled, "exit", command) {
-            loop = false
-        }
-        
-        if is_command(&builtins, &handled, "echo", command) {
+        if is_command(&state, "exit", command) {
+            state.exit = true
+        } else if is_command(&state, "echo", command) {
             fmt.printf("%v\n", arguments)
-        }
-
-        if is_command(&builtins, &handled, "type", command) {
+        } else if is_command(&state, "pwd", command) {
+            fmt.printf("%v\n", state.cwd)
+        } else if is_command(&state, "type", command) {
             found := false
-            for it in builtins {
+            for it in state.builtins {
                 if it == arguments {
                     found = true
                     break
@@ -60,11 +64,9 @@ main :: proc() {
                     fmt.printf("%v: not found\n", exe_name)
                 }
             }            
-        }
-        
-        if !handled {
+        } else {
             exe_name := command
-            fullpath, found := find_in_path(exe_name)
+            _, found := find_in_path(exe_name)
             
             if found {
                 exe_command: [dynamic] string
@@ -116,13 +118,12 @@ find_in_path :: proc (target: string) -> (string, bool) {
     return fullpath, ok
 }
 
-is_command :: proc (builtins: ^[dynamic] string, handled: ^bool, command, input: string) -> bool {
-    append(builtins, command)
+is_command :: proc (state: ^State, command, input: string) -> bool {
+    append(&state.builtins, command)
     
     result: bool
     if input == command {
         result = true
-        handled^ = true
     }
     
     return result
