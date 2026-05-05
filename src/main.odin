@@ -32,6 +32,13 @@ main :: proc() {
             loop = false
         case "echo":
             fmt.printf("%v\n", arguments)
+        case "type":
+            switch arguments {
+            case "exit", "echo":
+                fmt.printf("%v is a shell builtin\n", arguments)
+            case:
+                fmt.printf("%v: not found\n", arguments)
+            }
         case:
             fmt.printf("%v: command not found\n", command)
         }
