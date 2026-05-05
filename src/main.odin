@@ -30,8 +30,9 @@ Input :: struct {
 Target :: enum { Out, Err }
 
 Job :: struct {
-    index:   int,
+    id:   int,
     process: os.Process,
+    command_line: string,
 }
 
 Job_State :: enum {
@@ -145,6 +146,13 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
     } else if is_command(state, "pwd", command) {
         fmt.sbprintf(output, "%v\n", state.working_directory)
     } else if is_command(state, "jobs", command) {
+        for job in state.jobs[.Running] {
+            info, info_error := os.process_info_by_handle(job.process, {}, state.command_allocator)
+            if info_error != nil {
+                fmt.println("info, info_error", info, info_error)
+            }
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, state.last_used_job_id == job.id ? "+" : " ", "Running", job.command_line)
+        }
         // @todo(viktor): 
     } else if is_command(state, "type", command) {
         is_builtin := false
@@ -195,7 +203,8 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                 
                 state.last_used_job_id += 1
                 id := state.last_used_job_id
-                append(&state.jobs[.Running], Job{ id, process })
+                
+                append(&state.jobs[.Running], Job{ id, process, strings.join(exe_command[:], " ", state.allocator) })
                 fmt.sbprintfln(output, "[%v] %v", id, process.pid)
             } else {
                 _, out_buffer, err_buffer, exec_error := os.process_exec(description, state.command_allocator)
@@ -395,14 +404,6 @@ find_in_path :: proc (target: string) -> (string, bool) {
     }
     
     return fullpath, ok
-}
-
-clone_string :: proc (s: string, allocator: runtime.Allocator) -> string {
-    bytes := transmute([] u8) s
-    buffer := make([] u8, len(bytes), allocator)
-    copy(buffer, bytes)
-    result := transmute(string) buffer
-    return result
 }
 
 is_command :: proc (state: ^State, command, input: string) -> bool {
