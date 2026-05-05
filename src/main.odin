@@ -53,7 +53,6 @@ main :: proc() {
             if os.is_directory(next) {
                 next, _ = os.clean_path(next, context.allocator)
                 
-                fmt.eprintf("changing from `%v` to `%v`\n", state.working_directory, next)
                 delete_string(state.working_directory)
                 state.working_directory = next
             } else {
