@@ -40,7 +40,7 @@ main :: proc() {
             fmt.printf("%v\n", arguments)
         }
 
-        if is_command(&builtins, &handled, "exit", command) {
+        if is_command(&builtins, &handled, "type", command) {
             found := false
             for it in builtins {
                 if it == arguments {
