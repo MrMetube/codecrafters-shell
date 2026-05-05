@@ -267,19 +267,28 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
     result: Input
     {
         next_is_out: bool
+        next_is_err: bool
         out_index: int = -1
+        err_index: int = -1
         for arg, index in arguments {
             if next_is_out {
                 next_is_out = false
                 out_index = index
             }
+            if next_is_err {
+                next_is_err = false
+                err_index = index
+            }
             
             if arg == "1>" || arg == ">" {
                 next_is_out = true
             }
+            if arg == "2>" {
+                next_is_err = true
+            }
         }
         
-        if next_is_out {
+        if next_is_err || next_is_out {
             // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
         }
         
@@ -287,6 +296,12 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
             // @todo(viktor): handle the error
             result.stdout, _ = os.create(parse_path(state, arguments[out_index]))
             remove_range(&arguments, out_index-1, out_index+1)
+        }
+        
+        if err_index != -1 {
+            // @todo(viktor): handle the error
+            result.stderr, _ = os.create(parse_path(state, arguments[err_index]))
+            remove_range(&arguments, err_index-1, err_index+1)
         }
     }
     
