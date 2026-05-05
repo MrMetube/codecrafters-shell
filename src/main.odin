@@ -146,6 +146,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
     } else if is_command(state, "pwd", command) {
         fmt.sbprintf(output, "%v\n", state.working_directory)
     } else if is_command(state, "jobs", command) {
+        high_job_ids: [2] int
         #reverse for job, job_index in state.jobs[.Running] {
             process_state, wait_error := os.process_wait(job.process, timeout = 0)
             if wait_error != nil && wait_error != .Timeout {
@@ -155,19 +156,26 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             if process_state.exited {
                 unordered_remove(&state.jobs[.Running], job_index)
                 append(&state.jobs[.Done], job)
+            } else {
+                if job.id > high_job_ids[0] {
+                    high_job_ids[1] = high_job_ids[0]
+                    high_job_ids[0] = job.id
+                } else if job.id > high_job_ids[1] {
+                    high_job_ids[1] = job.id
+                }
             }
         }
         
         for job in state.jobs[.Done] {
             icon := " "
-            if job.id == state.last_used_job_id     { icon = "+" }
-            if job.id == state.last_used_job_id - 1 { icon = "-" } 
+            if job.id == high_job_ids[0] { icon = "+" }
+            if job.id == high_job_ids[1] { icon = "-" } 
             fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, Job_State.Done, job.command_line)
         }
         for job in state.jobs[.Running] {
             icon := " "
-            if job.id == state.last_used_job_id     { icon = "+" }
-            if job.id == state.last_used_job_id - 1 { icon = "-" } 
+            if job.id == high_job_ids[0] { icon = "+" }
+            if job.id == high_job_ids[1] { icon = "-" } 
             fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, Job_State.Running, job.command_line)
         }
         
