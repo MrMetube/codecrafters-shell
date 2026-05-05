@@ -302,7 +302,7 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
                 path := parse_path(state, arguments[it])
                 // @todo(viktor): handle the error
                 if is_append[kind] {
-                    result.file[kind], _ = os.open(path, flags = {.Read, .Write, .Append }) 
+                    result.file[kind], _ = os.open(path, flags = {.Read, .Create, .Write, .Append }) 
                 } else {
                     result.file[kind], _ = os.create(path)
                 }
