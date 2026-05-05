@@ -33,17 +33,76 @@ main :: proc() {
         }
         input := transmute(string) buffer[:read_bytes]
         
-        arguments := strings.trim_space(input)
-        command   := chop(&arguments, " ")
+        arguments_: [dynamic] string // @leak
+        parse_state: enum {
+            Default,
+            Single_Quote,
+        }
+        
+        current: strings.Builder // @leak
+        skip_next: bool
+        for r, index in input {
+            if skip_next {
+                skip_next = false
+                continue
+            }
+            
+            switch parse_state {
+            case .Default:
+                if r == '\'' {
+                    if index+1 < len(input) && input[index+1] == '\'' {
+                        skip_next = true
+                    } else {
+                        if strings.builder_len(current) != 0 {
+                            append(&arguments_, strings.clone(strings.to_string(current), context.temp_allocator))
+                            strings.builder_reset(&current)
+                        }
+                        parse_state = .Single_Quote
+                    }
+                } else if strings.is_space(r) {
+                    if strings.builder_len(current) != 0 {
+                        append(&arguments_, strings.clone(strings.to_string(current), context.temp_allocator))
+                        strings.builder_reset(&current)
+                    }
+                } else {
+                    fmt.sbprintf(&current, "%v", r)
+                }
+                
+            case .Single_Quote: // 
+                if r == '\'' {
+                    if index+1 < len(input) && input[index+1] == '\'' {
+                        skip_next = true
+                    } else {
+                        if strings.builder_len(current) != 0 {
+                            append(&arguments_, strings.clone(strings.to_string(current), context.temp_allocator))
+                            strings.builder_reset(&current)
+                        }
+                        parse_state = .Default
+                    }
+                } else {
+                    fmt.sbprintf(&current, "%v", r)
+                }
+            }
+        }
+        
+        arguments := arguments_[:]
+        
+        if len(arguments) == 0 do continue
+        
+        command := shift(&arguments)
         
         clear(&state.builtins)
 
         if is_command(&state, "exit", command) {
             state.exit = true
         } else if is_command(&state, "echo", command) {
-            fmt.printf("%v\n", arguments)
+            for arg, index in arguments {
+                if index != 0 do fmt.printf(" ")
+                fmt.printf("%v", arg)
+            }
+            fmt.printf("\n")
         } else if is_command(&state, "cd", command) {
-            target := chop(&arguments, " ")
+            target := shift(&arguments)
             
             if target == "~" {
                 target, _ = os.user_home_dir(context.temp_allocator)
@@ -64,8 +123,10 @@ main :: proc() {
             fmt.printf("%v\n", state.working_directory)
         } else if is_command(&state, "type", command) {
             found := false
+            
+            exe_name := shift(&arguments)
             for it in state.builtins {
-                if it == arguments {
+                if it == exe_name {
                     found = true
                     break
                 }
@@ -74,8 +135,6 @@ main :: proc() {
             if found {
                 fmt.printf("%v is a shell builtin\n", arguments)
             } else {
-                exe_name := chop(&arguments, " ")
-                
                 fullpath, ok := find_in_path(exe_name)
                 if ok {
                     fmt.printf("%v is %v\n", exe_name, fullpath)
@@ -88,11 +147,10 @@ main :: proc() {
             _, found := find_in_path(exe_name)
             
             if found {
-                exe_command: [dynamic] string
+                exe_command: [dynamic] string // @leak
+                
                 append(&exe_command, exe_name)
-                for arguments != "" {
-                    append(&exe_command, chop(&arguments, " "))
-                }
+                append(&exe_command, ..arguments)
                 
                 description: os.Process_Desc
                 description.command = exe_command[:]
@@ -154,6 +212,13 @@ is_command :: proc (state: ^State, command, input: string) -> bool {
         result = true
     }
     
+    return result
+}
+
+shift :: proc (s: ^[] string) -> string {
+    assert(len(s) > 0)
+    result := s[0]
+    s^ = s[1:]
     return result
 }
 
