@@ -23,8 +23,9 @@ main :: proc() {
         }
         input := transmute(string) buffer[:read_bytes]
         
-        command   := input
-        arguments := chop(&command, " ")
+        arguments := strings.trim_space(input)
+        command   := chop(&arguments, " ")
+        // fmt.printf("command = `%v` arguments = `%v`", command, arguments)
         
         switch command {
         case "exit":
