@@ -72,7 +72,6 @@ main :: proc() {
                 for arguments != "" {
                     append(&exe_command, chop(&arguments, " "))
                 }
-                fmt.eprintln(exe_command)
                 
                 description: os.Process_Desc
                 description.command = exe_command[:]
