@@ -16,6 +16,27 @@ State :: struct {
     command_allocator: runtime.Allocator,
     
     builtins: [dynamic] string,
+    
+    last_used_job_id: int,
+    jobs: [Job_State] [dynamic] Job
+}
+
+Input :: struct {
+    arguments:  [] string,
+    file:       [Target] ^os.File,
+    background: bool,
+}
+
+Target :: enum { Out, Err }
+
+Job :: struct {
+    index:   int,
+    process: os.Process,
+}
+
+Job_State :: enum {
+    Running,
+    Done,
 }
 
 state_init :: proc (state: ^State) {
@@ -23,6 +44,9 @@ state_init :: proc (state: ^State) {
     state.allocator         = context.allocator
     
     state.working_directory, _ = os.get_working_directory(state.allocator)
+    
+    state.builtins = make([dynamic] string, state.allocator)
+    for &it in state.jobs do it = make([dynamic] Job, state.allocator)
     
     clear(&state.builtins)
     dummy := strings.builder_make(context.temp_allocator)
@@ -158,17 +182,34 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                 working_dir = state.working_directory,
             }
             
-            _, out_buffer, err_buffer, exec_error := os.process_exec(description, state.command_allocator)
-            
-            if exec_error != nil {
-                fmt.sbprintf(error, "ERROR trying to execute %v: %v\n", exe_name, error)
+            if input.background {
+                description.stdout = input.file[.Out]
+                description.stderr = input.file[.Err]
+                
+                process, start_error := os.process_start(description)
+                info, _ := os.process_info_by_handle(process, {.PPid}, context.temp_allocator)
+                info.ppid
+                if start_error != nil {
+                    fmt.sbprintf(error, "ERROR trying to start %v: %v\n", exe_name, error)
+                }
+                
+                state.last_used_job_id += 1
+                id := state.last_used_job_id
+                append(&state.jobs[.Running], Job{ id, process })
+                fmt.sbprintfln(output, "[%v] %v", id, process.pid)
+            } else {
+                _, out_buffer, err_buffer, exec_error := os.process_exec(description, state.command_allocator)
+                
+                if exec_error != nil {
+                    fmt.sbprintf(error, "ERROR trying to execute %v: %v\n", exe_name, error)
+                }
+                
+                out_string := transmute(string) out_buffer
+                err_string := transmute(string) err_buffer
+                
+                fmt.sbprintf(output, "%v", out_string)
+                fmt.sbprintf(error, "%v", err_string)
             }
-            
-            out_string := transmute(string) out_buffer
-            err_string := transmute(string) err_buffer
-            
-            fmt.sbprintf(output, "%v", out_string)
-            fmt.sbprintf(error, "%v", err_string)
         } else {
             fmt.sbprintf(error, "%v: command not found\n", command)
         }
@@ -185,13 +226,6 @@ parse_path :: proc (state: ^State, target: string) -> string {
     
     return result
 }
-
-Input :: struct {
-    arguments: [] string,
-    file: [Target] ^os.File,
-}
-
-Target :: enum { Out, Err }
 
 parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Allocator) -> Input {
     arguments := make([dynamic] string, allocator)
@@ -324,6 +358,11 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
                 
                 remove_range(&arguments, index-1, index+1)
             }
+        }
+        
+        if arguments[len(arguments)-1] == "&" {
+            result.background = true
+            ordered_remove(&arguments, len(arguments)-1)
         }
     }
     
