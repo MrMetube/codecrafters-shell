@@ -174,6 +174,14 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, job.state, job.command_line)
         }
         
+        
+        for to, from: int; from < len(state.jobs); from += 1 {
+            job := state.jobs[from]
+            if job.state == .Running {
+                state.jobs[to] = job
+                to += 1
+            }
+        }
         #reverse for job, index in state.jobs {
             if job.state == .Done {
                 unordered_remove(&state.jobs, index)
