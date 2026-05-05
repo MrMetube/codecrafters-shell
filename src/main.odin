@@ -127,18 +127,11 @@ main :: proc() {
         }
         
         if strings.builder_len(out_sb) > 0 {
-            if input.stdout != nil {
-                fmt.fprintf(input.stdout, "%v", strings.to_string(out_sb))
-            } else {
-                fmt.printf("%v", strings.to_string(out_sb))
-            }
+            fmt.fprintf(input.file[.Out], "%v", strings.to_string(out_sb))
         }
+        
         if strings.builder_len(err_sb) > 0 {
-            if input.stderr != nil {
-                fmt.fprintf(input.stderr, "%v", strings.to_string(err_sb))
-            } else {
-                fmt.printf("%v", strings.to_string(err_sb))
-            }
+            fmt.fprintf(input.file[.Err], "%v", strings.to_string(err_sb))
         }
     }
 }
@@ -156,9 +149,10 @@ parse_path :: proc (state: ^State, target: string) -> string {
 
 Input :: struct {
     arguments: [] string,
-    stdout: ^os.File,
-    stderr: ^os.File,
+    file: [Target] ^os.File,
 }
+
+Target :: enum { Out, Err }
 
 parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Allocator) -> Input {
     arguments := make([dynamic] string, allocator)
@@ -265,43 +259,55 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
     }
     
     result: Input
+    result.file[.Out] = os.stdout
+    result.file[.Err] = os.stderr
     {
-        next_is_out: bool
-        next_is_err: bool
-        out_index: int = -1
-        err_index: int = -1
-        for arg, index in arguments {
-            if next_is_out {
-                next_is_out = false
-                out_index = index
-            }
-            if next_is_err {
-                next_is_err = false
-                err_index = index
+        is_append: [Target] bool
+        next: [Target] bool
+        index: [Target] int
+        
+        for arg, arg_index in arguments {
+            for kind in Target {
+                if next[kind] {
+                    next[kind] = false
+                    index[kind] = arg_index
+                }
             }
             
             if arg == "1>" || arg == ">" {
-                next_is_out = true
+                next[.Out] = true
             }
+            
             if arg == "2>" {
-                next_is_err = true
+                next[.Err] = true
+            }
+            
+            if arg == "1>>" || arg == ">>" {
+                next[.Out] = true
+                is_append[.Out] = true
+            }
+            
+            if arg == "2>>" {
+                next[.Err] = true
+                is_append[.Err] = true
             }
         }
         
-        if next_is_err || next_is_out {
+        if next[.Err] || next[.Out] {
             // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
         }
         
-        if out_index != -1 {
-            // @todo(viktor): handle the error
-            result.stdout, _ = os.create(parse_path(state, arguments[out_index]))
-            remove_range(&arguments, out_index-1, out_index+1)
-        }
-        
-        if err_index != -1 {
-            // @todo(viktor): handle the error
-            result.stderr, _ = os.create(parse_path(state, arguments[err_index]))
-            remove_range(&arguments, err_index-1, err_index+1)
+        for it, kind in index {
+            if it != -1 {
+                path := parse_path(state, arguments[it])
+                // @todo(viktor): handle the error
+                if is_append[kind] {
+                    result.file[kind], _ = os.open(path, flags = {.Read, .Write, .Append }) 
+                } else {
+                    result.file[kind], _ = os.create(path)
+                }
+                remove_range(&arguments, it-1, it+1)
+            }
         }
     }
     
