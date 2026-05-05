@@ -156,13 +156,13 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             
             if process_state.exited {
                 job.state = .Done
-            } else {
-                if job.id > high_job_ids[0] {
-                    high_job_ids[1] = high_job_ids[0]
-                    high_job_ids[0] = job.id
-                } else if job.id > high_job_ids[1] {
-                    high_job_ids[1] = job.id
-                }
+            }
+            
+            if job.id > high_job_ids[0] {
+                high_job_ids[1] = high_job_ids[0]
+                high_job_ids[0] = job.id
+            } else if job.id > high_job_ids[1] {
+                high_job_ids[1] = job.id
             }
         }
         
@@ -170,23 +170,21 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             icon := " "
             if job.id == high_job_ids[0] { icon = "+" }
             if job.id == high_job_ids[1] { icon = "-" } 
-            
-            fmt.sbprintfln(output, "[%v]%v  %-24s%v &", job.id, icon, job.state, job.command_line)
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, job.state, job.command_line)
         }
         
-        
-        fmt.println("before", state.jobs)
         to: int
         for from: int; from < len(state.jobs); from += 1 {
             job := state.jobs[from]
             if job.state == .Running {
                 state.jobs[to] = job
                 to += 1
+            } else {
+                delete(job.command_line, state.allocator)
             }
         }
         raw := cast(^runtime.Raw_Dynamic_Array) &state.jobs
         raw.len = to
-        fmt.println("after", state.jobs)
     } else if is_command(state, "type", command) {
         is_builtin := false
         
