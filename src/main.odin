@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:io"
 import "core:os"
+import "core:strings"
 
 main :: proc() {
     fmt.printf("$ ")
@@ -19,5 +20,6 @@ main :: proc() {
     }
     
     command := transmute(string) buffer[:read_bytes]
+    command = strings.trim_right_space(command)
     fmt.printf("%v: command not found\n", command)
 }
