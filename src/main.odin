@@ -18,6 +18,6 @@ main :: proc() {
         fmt.panicf("ERROR: failed to read into buffer:%v\n", read_error)
     }
     
-    command := buffer[:read_bytes]
+    command := transmute(string) buffer[:read_bytes]
     fmt.printf("%v: command not found\n", command)
 }
