@@ -141,16 +141,14 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             continue
         }
         
+        append_current: bool
+        append_rune: bool
         if escape_next {
             escape_next = false
-            switch r {
-            case:
-                fmt.sbprintf(&current, "%v", r)
-            }
+            fmt.sbprintf(&current, "%v", r)
             continue
         }
         
-        append_current: bool
         switch quote_kind {
         case .None:
             if r == '\"' {
@@ -172,7 +170,7 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             } else if strings.is_space(r) {
                 append_current = true
             } else {
-                fmt.sbprintf(&current, "%v", r)
+                append_rune = true
             }
             
         case .Single:
@@ -184,7 +182,7 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                     quote_kind = .None
                 }
             } else {
-                fmt.sbprintf(&current, "%v", r)
+                append_rune = true
             }
         
         case .Double:
@@ -198,7 +196,7 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             } else if r == '\r' || r == '\n' {
                 append_current = true
             } else {
-                fmt.sbprintf(&current, "%v", r)
+                append_rune = true
             }
         }
         
@@ -207,6 +205,10 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                 append(&arguments, strings.clone(strings.to_string(current), allocator))
                 strings.builder_reset(&current)
             }
+        }
+        
+        if append_rune {
+            fmt.sbprintf(&current, "%v", r)
         }
     }
     
