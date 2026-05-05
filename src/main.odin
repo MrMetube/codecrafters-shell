@@ -26,6 +26,8 @@ main :: proc() {
         switch command {
         case "exit":
             loop = false
+        case "echo":
+            fmt.printf("%v\n", command)
         case:
             fmt.printf("%v: command not found\n", command)
         }
