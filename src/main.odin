@@ -175,13 +175,16 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
         }
         
         
-        for to, from: int; from < len(state.jobs); from += 1 {
+        to: int
+        for from: int; from < len(state.jobs); from += 1 {
             job := state.jobs[from]
             if job.state == .Running {
                 state.jobs[to] = job
                 to += 1
             }
         }
+        shrink_dynamic_array(&state.jobs, new_cap = to)
+        
         #reverse for job, index in state.jobs {
             if job.state == .Done {
                 unordered_remove(&state.jobs, index)
