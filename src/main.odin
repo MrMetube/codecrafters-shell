@@ -17,8 +17,8 @@ State :: struct {
     
     builtins: [dynamic] string,
     
-    last_used_job_id: int,
-    jobs: [dynamic] Job
+    first_free_job: int,
+    _jobs: [dynamic] Job
 }
 
 Input :: struct {
@@ -31,14 +31,20 @@ Target :: enum { Out, Err }
 
 Job :: struct {
     state: Job_State,
-    id:   int,
     process: os.Process,
     command_line: string,
+    
+    next_free: int,
 }
 
 Job_State :: enum {
+    Unused,
     Running,
     Done,
+}
+
+Eval_Result :: struct {
+    did_reap_jobs: bool
 }
 
 state_init :: proc (state: ^State) {
@@ -48,7 +54,7 @@ state_init :: proc (state: ^State) {
     state.working_directory, _ = os.get_working_directory(state.allocator)
     
     state.builtins = make([dynamic] string, state.allocator)
-    state.jobs = make([dynamic] Job, state.allocator)
+    state._jobs = make([dynamic] Job, 1, state.allocator)
     
     clear(&state.builtins)
     dummy := strings.builder_make(context.temp_allocator)
@@ -123,10 +129,6 @@ main :: proc () {
         fmt.fprintf(input.file[.Out], "%v", strings.to_string(out))
         fmt.fprintf(input.file[.Err], "%v", strings.to_string(err))
     }
-}
-
-Eval_Result :: struct {
-    did_reap_jobs: bool
 }
 
 eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^strings.Builder) -> Eval_Result {
@@ -206,10 +208,24 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                     fmt.sbprintf(error, "ERROR trying to start %v: %v\n", exe_name, error)
                 }
                 
-                state.last_used_job_id += 1
-                id := state.last_used_job_id
+                id: int
+                if state.first_free_job != 0 {
+                    id = state.first_free_job
+                    state.first_free_job = state._jobs[state.first_free_job].next_free
+                    job := &state._jobs[id]
+                    delete(job.command_line, state.allocator)
+                } else {
+                    id = len(state._jobs)
+                    append_nothing(&state._jobs)
+                }
                 
-                append(&state.jobs, Job{ .Running, id, process, strings.join(exe_command[:], " ", state.allocator) })
+                job := &state._jobs[id]
+                job^ = {
+                    state = .Running,
+                    process = process,
+                    command_line = strings.join(exe_command[:], " ", state.allocator),
+                }
+                
                 fmt.sbprintfln(output, "[%v] %v", id, process.pid)
             } else {
                 _, out_buffer, err_buffer, exec_error := os.process_exec(description, state.command_allocator)
@@ -245,7 +261,9 @@ parse_path :: proc (state: ^State, target: string) -> string {
 
 reap_jobs_and_print :: proc (state: ^State, output: ^strings.Builder, show_running := false) {
     high_job_ids: [2] int
-    for &job in state.jobs {
+    for &job, id in state._jobs {
+        if job.state == .Unused do continue
+        
         process_state, wait_error := os.process_wait(job.process, timeout = 0)
         if wait_error != nil && wait_error != .Timeout {
             fmt.printfln("ERROR trying to wait on %v: %v", job.process.pid, wait_error)
@@ -253,41 +271,32 @@ reap_jobs_and_print :: proc (state: ^State, output: ^strings.Builder, show_runni
         
         if process_state.exited {
             job.state = .Done
+            job.next_free = state.first_free_job
+            state.first_free_job = id
         }
         
-        if job.id > high_job_ids[0] {
+        if id > high_job_ids[0] {
             high_job_ids[1] = high_job_ids[0]
-            high_job_ids[0] = job.id
-        } else if job.id > high_job_ids[1] {
-            high_job_ids[1] = job.id
+            high_job_ids[0] = id
+        } else if id > high_job_ids[1] {
+            high_job_ids[1] = id
         }
     }
     
-    for job in state.jobs {
+    for job, id in state._jobs {
+        if job.state == .Unused do continue
+        
         icon := " "
-        if job.id == high_job_ids[0] { icon = "+" }
-        if job.id == high_job_ids[1] { icon = "-" } 
+        if id == high_job_ids[0] { icon = "+" }
+        if id == high_job_ids[1] { icon = "-" } 
         
         print := job.state == .Done
         if show_running do print = true
         
         if print {
-            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, job.state, job.command_line)
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v", id, icon, job.state, job.command_line)
         }
     }
-    
-    to: int
-    for from: int; from < len(state.jobs); from += 1 {
-        job := state.jobs[from]
-        if job.state == .Running {
-            state.jobs[to] = job
-            to += 1
-        } else {
-            delete(job.command_line, state.allocator)
-        }
-    }
-    raw := cast(^runtime.Raw_Dynamic_Array) &state.jobs
-    raw.len = to
 }
 
 parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Allocator) -> Input {
