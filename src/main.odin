@@ -262,51 +262,65 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
     result.file[.Out] = os.stdout
     result.file[.Err] = os.stderr
     {
-        is_append: [Target] bool
-        next: [Target] bool
-        index: [Target] int = {.Out = -1, .Err = -1}
+        is:    [Target] enum { None, Create, Append }
+        index: [Target] int
         
         for arg, arg_index in arguments {
-            for kind in Target {
-                if next[kind] {
-                    next[kind] = false
-                    index[kind] = arg_index
-                }
-            }
-            
             if arg == "1>" || arg == ">" {
-                next[.Out] = true
+                if arg_index == len(arguments) -1 {
+                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
+                } else {
+                    is[.Out] = .Create
+                    index[.Out] = arg_index + 1
+                }
             }
             
             if arg == "2>" {
-                next[.Err] = true
+                if arg_index == len(arguments) -1 {
+                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
+                } else {
+                    is[.Err] = .Create
+                    index[.Err] = arg_index + 1
+                }
             }
             
             if arg == "1>>" || arg == ">>" {
-                next[.Out] = true
-                is_append[.Out] = true
+                if arg_index == len(arguments) -1 {
+                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
+                } else {
+                    is[.Out] = .Append
+                    index[.Out] = arg_index + 1
+                }
             }
             
             if arg == "2>>" {
-                next[.Err] = true
-                is_append[.Err] = true
+                if arg_index == len(arguments) -1 {
+                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
+                } else {
+                    is[.Err] = .Append
+                    index[.Err] = arg_index + 1
+                }
             }
         }
         
-        if next[.Err] || next[.Out] {
-            // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
-        }
-        
-        for it, kind in index {
-            if it != -1 {
-                path := parse_path(state, arguments[it])
-                // @todo(viktor): handle the error
-                if is_append[kind] {
-                    result.file[kind], _ = os.open(path, flags = {.Read, .Create, .Write, .Append }) 
+        for kind in Target {
+            if is[kind] != .None {
+                index := index[kind]
+                
+                path := parse_path(state, arguments[index])
+                
+                flags := os.File_Flags{ .Read, .Write, .Create }
+                if is[kind] == .Append {
+                    flags += { .Append }
                 } else {
-                    result.file[kind], _ = os.create(path)
+                    assert(is[kind] == .Create)
+                    flags += { .Trunc }
                 }
-                remove_range(&arguments, it-1, it+1)
+                
+                // @todo(viktor): handle the error
+                result.file[kind], _ = os.open(path, flags) 
+                
+                remove_range(&arguments, index-1, index+1)
             }
         }
     }
