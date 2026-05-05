@@ -26,7 +26,6 @@ main :: proc() {
         
         arguments := strings.trim_space(input)
         command   := chop(&arguments, " ")
-        // fmt.printf("command = `%v` arguments = `%v`", command, arguments)
         
         handled := false
         
@@ -65,9 +64,8 @@ main :: proc() {
         
         if !handled {
             exe_name := command
-            fmt.eprintf("`%v`\n", exe_name)
             fullpath, found := find_in_path(exe_name)
-            fmt.eprintf("`%v` = %v\n", fullpath, found)
+            
             if found {
                 exe_command: [dynamic] string
                 append(&exe_command, fullpath)
@@ -78,13 +76,10 @@ main :: proc() {
                 
                 description: os.Process_Desc
                 description.command = exe_command[:]
-                // description.stdout = os.stdout
-                // description.stderr = os.stderr
-                // description.stdin  = os.stdin
                 
                 state, out_buffer, err_buffer, error := os.process_exec(description, context.temp_allocator)
                 out_string := transmute(string) out_buffer
-                fmt.printf("%v: %v", out_string, error)
+                fmt.printf("%v", out_string)
                 assert(error == nil)
             } else {
                 fmt.printf("%v: command not found\n", command)
@@ -106,9 +101,11 @@ find_in_path :: proc (target: string) -> (string, bool) {
         dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
         if dir_error == nil {
             for info in dir_info {
-                if (os.Permissions_Execute_All & info.mode != {}) && info.name == target {
-                    fullpath = info.fullpath
-                    ok = true
+                if (os.Permissions_Execute_All & info.mode != {}) {
+                    if info.name == target {
+                        fullpath = info.fullpath
+                        ok = true
+                    }
                 }
             }
         }
