@@ -185,6 +185,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
         }
         raw := cast(^runtime.Raw_Dynamic_Array) &state.jobs
         raw.len = to
+        fmt.println(state.jobs)
     } else if is_command(state, "type", command) {
         is_builtin := false
         
