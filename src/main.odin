@@ -12,7 +12,8 @@ main :: proc() {
     
     buffer: [256] u8
     
-    for {
+    loop := true
+    for loop {
         fmt.printf("$ ")
         
         read_bytes, read_error := io.read(r, buffer[:])
@@ -21,7 +22,12 @@ main :: proc() {
         }
         
         command := transmute(string) buffer[:read_bytes]
-        command = strings.trim_right_space(command)
-        fmt.printf("%v: command not found\n", command)
+        command = strings.trim_space(command)
+        switch command {
+        case "exit":
+            loop = false
+        case:
+            fmt.printf("%v: command not found\n", command)
+        }
     }
 }
