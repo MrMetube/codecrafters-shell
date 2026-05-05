@@ -68,7 +68,7 @@ main :: proc() {
             
             if found {
                 exe_command: [dynamic] string
-                append(&exe_command, fullpath)
+                append(&exe_command, exe_name)
                 for arguments != "" {
                     append(&exe_command, chop(&arguments, " "))
                 }
@@ -79,6 +79,9 @@ main :: proc() {
                 state, out_buffer, err_buffer, error := os.process_exec(description, context.temp_allocator)
                 out_string := transmute(string) out_buffer
                 fmt.printf("%v", out_string)
+                if error != nil {
+                    fmt.panicf("ERROR trying to execute %v: %v\n", exe_name, error)
+                }
                 assert(error == nil)
             } else {
                 fmt.printf("%v: command not found\n", command)
