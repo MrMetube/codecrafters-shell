@@ -10,6 +10,8 @@ State :: struct {
     working_directory: string,
     exit: bool,
     
+    command_allocator: runtime.Allocator,
+    
     builtins: [dynamic] string,
 }
 
@@ -20,14 +22,14 @@ main :: proc() {
     
     buffer: [256] u8
     
-    command_allocator := context.temp_allocator
+    state: State
+    state.command_allocator = context.temp_allocator
     state_allocator   := context.allocator
     
-    state: State
     state.working_directory, _ = os.get_working_directory(state_allocator)
     
     for !state.exit {
-        free_all(command_allocator)
+        free_all(state.command_allocator)
         
         fmt.printf("$ ")
         
@@ -38,7 +40,7 @@ main :: proc() {
         }
         input := transmute(string) buffer[:read_bytes]
         
-        arguments := parse_arguments(input, command_allocator)
+        arguments := parse_arguments(input, state.command_allocator)
         
         if len(arguments) == 0 do continue
         
@@ -56,12 +58,8 @@ main :: proc() {
             fmt.printf("\n")
         } else if is_command(&state, "cd", command) {
             target := shift(&arguments)
-            
-            if target == "~" {
-                target, _ = os.user_home_dir(command_allocator)
-            } else if !os.is_absolute_path(target) {
-                target, _ = os.join_path({state.working_directory, target}, command_allocator)
-            }
+
+            target = parse_path(&state, target)
             
             if os.is_directory(target) {
                 next, _ := os.clean_path(target, state_allocator)
@@ -74,6 +72,17 @@ main :: proc() {
             
         } else if is_command(&state, "pwd", command) {
             fmt.printf("%v\n", state.working_directory)
+        } else if is_command(&state, "cat", command) {
+            for arg in arguments {
+                path := parse_path(&state, arg)
+                bytes, error := os.read_entire_file(path, state.command_allocator)
+                if error != nil {
+                    fmt.printf("Error: failed to open file `%v`: %v\n", arg, error)
+                } else {
+                    text := transmute(string) bytes
+                    fmt.printf("%v", text)
+                }
+            }
         } else if is_command(&state, "type", command) {
             found := false
             
@@ -109,7 +118,7 @@ main :: proc() {
                 description.command = exe_command[:]
                 description.working_dir = state.working_directory
                 
-                state, out_buffer, err_buffer, error := os.process_exec(description, command_allocator)
+                state, out_buffer, err_buffer, error := os.process_exec(description, state.command_allocator)
                 out_string := transmute(string) out_buffer
                 fmt.printf("%v", out_string)
                 if error != nil {
@@ -121,6 +130,17 @@ main :: proc() {
             }
         }
     }
+}
+
+parse_path :: proc (state: ^State, target: string) -> string {
+    result := target
+    if target == "~" {
+        result, _ = os.user_home_dir(state.command_allocator)
+    } else if !os.is_absolute_path(target) {
+        result, _ = os.join_path({state.working_directory, target}, state.command_allocator)
+    }
+    
+    return result
 }
 
 parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] string {
@@ -136,67 +156,65 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
     skip_next: bool
     escape_next: bool
     for r, index in input {
+        append_current: bool
+        append_rune: bool
+        
         if skip_next {
             skip_next = false
             continue
-        }
-        
-        append_current: bool
-        append_rune: bool
-        if escape_next {
+        } else if escape_next {
             escape_next = false
-            fmt.sbprintf(&current, "%v", r)
-            continue
-        }
-        
-        switch quote_kind {
-        case .None:
-            if r == '\"' {
-                if index+1 < len(input) && input[index+1] == '\"' {
-                    skip_next = true
-                } else {
+            append_rune = true
+        } else {
+            switch quote_kind {
+            case .None:
+                if r == '\"' {
+                    if index+1 < len(input) && input[index+1] == '\"' {
+                        skip_next = true
+                    } else {
+                        append_current = true
+                        quote_kind = .Double
+                    }
+                } else if r == '\'' {
+                    if index+1 < len(input) && input[index+1] == '\'' {
+                        skip_next = true
+                    } else {
+                        append_current = true
+                        quote_kind = .Single
+                    }
+                } else if r == '\\' {
+                    escape_next = true
+                } else if strings.is_space(r) {
                     append_current = true
-                    quote_kind = .Double
-                }
-            } else if r == '\'' {
-                if index+1 < len(input) && input[index+1] == '\'' {
-                    skip_next = true
                 } else {
-                    append_current = true
-                    quote_kind = .Single
+                    append_rune = true
                 }
-            } else if r == '\\' {
-                escape_next = true
-            } else if strings.is_space(r) {
-                append_current = true
-            } else {
-                append_rune = true
-            }
+                
+            case .Single:
+                if r == '\'' {
+                    if index+1 < len(input) && input[index+1] == '\'' {
+                        skip_next = true
+                    } else {
+                        append_current = true
+                        quote_kind = .None
+                    }
+                } else {
+                    append_rune = true
+                }
             
-        case .Single:
-            if r == '\'' {
-                if index+1 < len(input) && input[index+1] == '\'' {
-                    skip_next = true
-                } else {
+            case .Double:
+                if r == '\"' {
+                    if index+1 < len(input) && input[index+1] == '\"' {
+                        skip_next = true
+                    } else {
+                        append_current = true
+                        quote_kind = .None
+                    }
+                } else if r == '\r' || r == '\n' {
                     append_current = true
-                    quote_kind = .None
-                }
-            } else {
-                append_rune = true
-            }
-        
-        case .Double:
-            if r == '\"' {
-                if index+1 < len(input) && input[index+1] == '\"' {
-                    skip_next = true
                 } else {
-                    append_current = true
-                    quote_kind = .None
+                    append_rune = true
                 }
-            } else if r == '\r' || r == '\n' {
-                append_current = true
-            } else {
-                append_rune = true
             }
         }
         
@@ -205,10 +223,8 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                 append(&arguments, strings.clone(strings.to_string(current), allocator))
                 strings.builder_reset(&current)
             }
-        }
-        
-        if append_rune {
-            fmt.sbprintf(&current, "%v", r)
+        } else if append_rune {
+            strings.write_rune(&current, r)
         }
     }
     
