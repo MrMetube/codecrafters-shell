@@ -13,6 +13,7 @@ main :: proc() {
     buffer: [256] u8
     
     loop := true
+    builtins: [dynamic] string
     for loop {
         fmt.printf("$ ")
         
@@ -27,22 +28,50 @@ main :: proc() {
         command   := chop(&arguments, " ")
         // fmt.printf("command = `%v` arguments = `%v`", command, arguments)
         
-        switch command {
-        case "exit":
+        handled := false
+        
+        clear(&builtins)
+
+        if is_command(&builtins, &handled, "exit", command) {
             loop = false
-        case "echo":
+        }
+        
+        if is_command(&builtins, &handled, "echo", command) {
             fmt.printf("%v\n", arguments)
-        case "type":
-            switch arguments {
-            case "exit", "echo":
-                fmt.printf("%v is a shell builtin\n", arguments)
-            case:
-                fmt.printf("%v: not found\n", arguments)
+        }
+
+        if is_command(&builtins, &handled, "exit", command) {
+            found := false
+            for it in builtins {
+                if it == arguments {
+                    found = true
+                    break
+                }
             }
-        case:
+            
+            if found {
+                fmt.printf("%v is a shell builtin\n", arguments)
+            } else {
+                fmt.printf("%v: not found\n", arguments)
+            }            
+        }
+        
+        if !handled {
             fmt.printf("%v: command not found\n", command)
         }
     }
+}
+
+is_command :: proc (builtins: ^[dynamic] string, handled: ^bool, command, input: string) -> bool {
+    append(builtins, command)
+    
+    result: bool
+    if input == command {
+        result = true
+        handled^ = true
+    }
+    
+    return result
 }
 
 chop :: proc (s: ^string, separator: string) -> string {
