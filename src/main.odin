@@ -228,6 +228,8 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             fmt.sbprintf(error, "%v: command not found\n", command)
         }
     }
+    
+    return result
 }
 
 parse_path :: proc (state: ^State, target: string) -> string {
