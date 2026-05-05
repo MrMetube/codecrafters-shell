@@ -175,6 +175,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
         }
         
         
+        fmt.println("before", state.jobs)
         to: int
         for from: int; from < len(state.jobs); from += 1 {
             job := state.jobs[from]
@@ -185,7 +186,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
         }
         raw := cast(^runtime.Raw_Dynamic_Array) &state.jobs
         raw.len = to
-        fmt.println(state.jobs)
+        fmt.println("after", state.jobs)
     } else if is_command(state, "type", command) {
         is_builtin := false
         
