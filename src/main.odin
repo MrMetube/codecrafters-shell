@@ -151,6 +151,11 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
         
         defer was_space = strings.is_space(r)
         
+        next_rune: rune
+        if index+1 < len(input) {
+            next_rune = cast(rune) input[index+1]
+        }
+        
         if skip_next {
             skip_next = false
             continue
@@ -168,7 +173,7 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             switch quote_kind {
             case .None:
                 if r == '\"' {
-                    if index+1 < len(input) && input[index+1] == '\"' {
+                    if next_rune == '\"' {
                         skip_next = true
                     } else {
                         if was_space {
@@ -177,7 +182,7 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                         quote_kind = .Double
                     }
                 } else if r == '\'' {
-                    if index+1 < len(input) && input[index+1] == '\'' {
+                    if next_rune == '\'' {
                         skip_next = true
                     } else {
                         if was_space {
@@ -195,10 +200,10 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                 
             case .Single:
                 if r == '\'' {
-                    if index+1 < len(input) && input[index+1] == '\'' {
+                    if next_rune == '\'' {
                         skip_next = true
                     } else {
-                        append_current = true
+                        // append_current = true
                         quote_kind = .None
                     }
                 } else {
@@ -207,10 +212,10 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             
             case .Double:
                 if r == '\"' {
-                    if index+1 < len(input) && input[index+1] == '\"' {
+                    if next_rune == '\"' {
                         skip_next = true
                     } else {
-                        append_current = true
+                        // append_current = true
                         quote_kind = .None
                     }
                 } else if r == '\\' {
