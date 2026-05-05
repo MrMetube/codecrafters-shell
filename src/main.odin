@@ -38,27 +38,32 @@ main :: proc() {
         if read_error != nil {
             fmt.panicf("ERROR: failed to read into buffer:%v\n", read_error)
         }
-        input := transmute(string) buffer[:read_bytes]
+        input_text := transmute(string) buffer[:read_bytes]
         
-        arguments := parse_arguments(input, state.command_allocator)
+        // @cleanup
+        input := parse_arguments(&state, input_text, state.command_allocator)
+        arguments := input.arguments
         
         if len(arguments) == 0 do continue
         
         command := shift(&arguments)
         
         clear(&state.builtins)
-
+        
+        out_sb := strings.builder_make(state.command_allocator)
+        err_sb := strings.builder_make(state.command_allocator)
+        
         if is_command(&state, "exit", command) {
             state.exit = true
         } else if is_command(&state, "echo", command) {
             for arg, index in arguments {
-                if index != 0 do fmt.printf(" ")
-                fmt.printf("%v", arg)
+                if index != 0 do fmt.sbprintf(&out_sb, " ")
+                fmt.sbprintf(&out_sb, "%v", arg)
             }
-            fmt.printf("\n")
+            fmt.sbprintf(&out_sb, "\n")
         } else if is_command(&state, "cd", command) {
             target := shift(&arguments)
-
+            
             target = parse_path(&state, target)
             
             if os.is_directory(target) {
@@ -67,11 +72,11 @@ main :: proc() {
                 delete_string(state.working_directory, state_allocator)
                 state.working_directory = next
             } else {
-                fmt.printf("cd: %v: No such file or directory\n", target)
+                fmt.sbprintf(&out_sb, "cd: %v: No such file or directory\n", target)
             }
             
         } else if is_command(&state, "pwd", command) {
-            fmt.printf("%v\n", state.working_directory)
+            fmt.sbprintf(&out_sb, "%v\n", state.working_directory)
         } else if is_command(&state, "type", command) {
             found := false
             
@@ -84,13 +89,13 @@ main :: proc() {
             }
             
             if found {
-                fmt.printf("%v is a shell builtin\n", exe_name)
+                fmt.sbprintf(&out_sb, "%v is a shell builtin\n", exe_name)
             } else {
                 fullpath, ok := find_in_path(exe_name)
                 if ok {
-                    fmt.printf("%v is %v\n", exe_name, fullpath)
+                    fmt.sbprintf(&out_sb, "%v is %v\n", exe_name, fullpath)
                 } else {
-                    fmt.printf("%v: not found\n", exe_name)
+                    fmt.sbprintf(&out_sb, "%v: not found\n", exe_name)
                 }
             }            
         } else {
@@ -106,16 +111,33 @@ main :: proc() {
                 description: os.Process_Desc
                 description.command = exe_command[:]
                 description.working_dir = state.working_directory
-                
-                state, out_buffer, err_buffer, error := os.process_exec(description, state.command_allocator)
-                out_string := transmute(string) out_buffer
-                fmt.printf("%v", out_string)
+                command_state, out_buffer, err_buffer, error := os.process_exec(description, state.command_allocator)
                 if error != nil {
-                    fmt.panicf("ERROR trying to execute %v: %v\n", exe_name, error)
+                    fmt.sbprintf(&err_sb, "ERROR trying to execute %v: %v\n", exe_name, error)
                 }
-                assert(error == nil)
+                
+                out_string := transmute(string) out_buffer
+                err_string := transmute(string) err_buffer
+                
+                fmt.sbprintf(&out_sb, "%v", out_string)
+                fmt.sbprintf(&err_sb, "%v", err_string)
             } else {
-                fmt.printf("%v: command not found\n", command)
+                fmt.sbprintf(&err_sb, "%v: command not found\n", command)
+            }
+        }
+        
+        if strings.builder_len(out_sb) > 0 {
+            if input.stdout != nil {
+                fmt.fprintf(input.stdout, "%v", strings.to_string(out_sb))
+            } else {
+                fmt.printf("%v", strings.to_string(out_sb))
+            }
+        }
+        if strings.builder_len(err_sb) > 0 {
+            if input.stderr != nil {
+                fmt.fprintf(input.stderr, "%v", strings.to_string(err_sb))
+            } else {
+                fmt.printf("%v", strings.to_string(err_sb))
             }
         }
     }
@@ -132,7 +154,13 @@ parse_path :: proc (state: ^State, target: string) -> string {
     return result
 }
 
-parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] string {
+Input :: struct {
+    arguments: [] string,
+    stdout: ^os.File,
+    stderr: ^os.File,
+}
+
+parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Allocator) -> Input {
     arguments := make([dynamic] string, allocator)
     quote_kind: enum {
         None,
@@ -203,7 +231,6 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                     if next_rune == '\'' {
                         skip_next = true
                     } else {
-                        // append_current = true
                         quote_kind = .None
                     }
                 } else {
@@ -215,7 +242,6 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                     if next_rune == '\"' {
                         skip_next = true
                     } else {
-                        // append_current = true
                         quote_kind = .None
                     }
                 } else if r == '\\' {
@@ -238,7 +264,35 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
         }
     }
     
-    return arguments[:]
+    result: Input
+    {
+        next_is_out: bool
+        out_index: int = -1
+        for arg, index in arguments {
+            if next_is_out {
+                next_is_out = false
+                out_index = index
+            }
+            
+            if arg == "1>" || arg == ">" {
+                next_is_out = true
+            }
+        }
+        
+        if next_is_out {
+            // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
+        }
+        
+        if out_index != -1 {
+            // @todo(viktor): handle the error
+            result.stdout, _ = os.create(parse_path(state, arguments[out_index]))
+            remove_range(&arguments, out_index-1, out_index+1)
+        }
+    }
+    
+    result.arguments = arguments[:]
+    
+    return result
 }
 
 find_in_path :: proc (target: string) -> (string, bool) {
