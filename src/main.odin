@@ -158,8 +158,9 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             escape_next = false
             if quote_kind == .Double {
                 switch r {
-                case '"', '\\', '$', '`', '\n':
+                case '"', '$', '`', '\n':
                     append_rune = true
+                case '\\':
                 }
             } else {
                 append_rune = true
@@ -213,6 +214,8 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                         append_current = true
                         quote_kind = .None
                     }
+                } else if r == '\\' {
+                    escape_next = true
                 } else if r == '\r' || r == '\n' {
                     append_current = true
                 } else {
