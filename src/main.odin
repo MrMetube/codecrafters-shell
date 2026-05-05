@@ -1,12 +1,13 @@
 package main
 
+import "base:runtime"
 import "core:fmt"
 import "core:io"
 import "core:os"
 import "core:strings"
 
 State :: struct {
-    cwd: string,
+    working_directory: string,
     exit: bool,
     
     builtins: [dynamic] string,
@@ -20,7 +21,7 @@ main :: proc() {
     buffer: [256] u8
     
     state: State
-    state.cwd, _ = os.get_working_directory(context.allocator)
+    state.working_directory, _ = os.get_working_directory(context.allocator)
     
     for !state.exit {
         fmt.printf("$ ")
@@ -41,8 +42,26 @@ main :: proc() {
             state.exit = true
         } else if is_command(&state, "echo", command) {
             fmt.printf("%v\n", arguments)
+        } else if is_command(&state, "cd", command) {
+            target := chop(&arguments, " ")
+            
+            next: string
+            if !os.is_absolute_path(target) {
+                next, _ = os.join_path({state.working_directory, target}, context.temp_allocator)
+            }
+            
+            if os.is_directory(next) {
+                next, _ = os.clean_path(next, context.allocator)
+                
+                fmt.eprintf("changing from `%v` to `%v`\n", state.working_directory, next)
+                delete_string(state.working_directory)
+                state.working_directory = next
+            } else {
+                fmt.printf("cd: %v: No such file or directory\n", next)
+            }
+            
         } else if is_command(&state, "pwd", command) {
-            fmt.printf("%v\n", state.cwd)
+            fmt.printf("%v\n", state.working_directory)
         } else if is_command(&state, "type", command) {
             found := false
             for it in state.builtins {
@@ -77,6 +96,7 @@ main :: proc() {
                 
                 description: os.Process_Desc
                 description.command = exe_command[:]
+                description.working_dir = state.working_directory
                 
                 state, out_buffer, err_buffer, error := os.process_exec(description, context.temp_allocator)
                 out_string := transmute(string) out_buffer
@@ -116,6 +136,14 @@ find_in_path :: proc (target: string) -> (string, bool) {
     }
     
     return fullpath, ok
+}
+
+clone_string :: proc (s: string, allocator: runtime.Allocator) -> string {
+    bytes := transmute([] u8) s
+    buffer := make([] u8, len(bytes), allocator)
+    copy(buffer, bytes)
+    result := transmute(string) buffer
+    return result
 }
 
 is_command :: proc (state: ^State, command, input: string) -> bool {
