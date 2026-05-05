@@ -4,7 +4,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:io"
 import "core:os"
-import "core:text"
 import "core:strings"
 
 State :: struct {
