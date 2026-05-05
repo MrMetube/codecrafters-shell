@@ -151,7 +151,10 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             if info_error != nil {
                 fmt.println("info, info_error", info, info_error)
             }
-            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, state.last_used_job_id == job.id ? "+" : " ", "Running", job.command_line)
+            icon := " "
+            if job.id == state.last_used_job_id     { icon = "+" }
+            if job.id == state.last_used_job_id - 1 { icon = "-" } 
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, "Running", job.command_line)
         }
         // @todo(viktor): 
     } else if is_command(state, "type", command) {
