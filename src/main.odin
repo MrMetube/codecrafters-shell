@@ -4,134 +4,174 @@ import "base:runtime"
 import "core:fmt"
 import "core:io"
 import "core:os"
+import "core:text"
 import "core:strings"
 
 State :: struct {
+    initialized: bool,
+    
     working_directory: string,
     exit: bool,
     
+    allocator: runtime.Allocator,
     command_allocator: runtime.Allocator,
     
     builtins: [dynamic] string,
 }
 
-main :: proc() {
+state_init :: proc (state: ^State) {
+    state.command_allocator = context.temp_allocator
+    state.allocator         = context.allocator
+    
+    state.working_directory, _ = os.get_working_directory(state.allocator)
+    
+    clear(&state.builtins)
+    dummy := strings.builder_make(context.temp_allocator)
+    input: Input
+    eval(state, "", &input, &dummy, &dummy)
+    
+    state.initialized = true
+}
+
+main :: proc () {
     standart_in := os.to_reader(os.stdin)
-    r, ok := io.to_read_write_closer(standart_in)
+    reader, ok := io.to_read_write_closer(standart_in)
     assert(ok)
     
-    buffer: [256] u8
-    
     state: State
-    state.command_allocator = context.temp_allocator
-    state_allocator   := context.allocator
-    
-    state.working_directory, _ = os.get_working_directory(state_allocator)
+    state_init(&state)
     
     for !state.exit {
         free_all(state.command_allocator)
         
         fmt.printf("$ ")
         
-        // @todo(viktor): read line, not read all
-        read_bytes, read_error := io.read(r, buffer[:])
-        if read_error != nil {
-            fmt.panicf("ERROR: failed to read into buffer:%v\n", read_error)
+        input_builder := strings.builder_make(state.command_allocator)
+        for {
+            read, _, read_error := io.read_rune(reader)
+            
+            if read_error != nil {
+                fmt.panicf("ERROR: failed to read into rune: %v\n", read_error)
+            }
+            
+            if read == '\r' {
+                read, _, read_error = io.read_rune(reader)
+                if read_error != nil {
+                    fmt.panicf("ERROR: failed to read into rune: %v\n", read_error)
+                }
+            }
+            
+            if read == '\n' {
+                break
+            }
+            
+            if read == '\t' {
+                partial_input := strings.to_string(input_builder)
+                fmt.printf("You input: ´%v´\n", partial_input)
+                for builtin in state.builtins {
+                    if strings.starts_with(builtin, partial_input) {
+                        fmt.printf("$ %v\n", builtin)
+                        break
+                    }
+                }
+            } else {
+                strings.write_rune(&input_builder, read)
+            }
         }
-        input_text := transmute(string) buffer[:read_bytes]
         
-        // @cleanup
+        input_text := strings.to_string(input_builder)
         input := parse_arguments(&state, input_text, state.command_allocator)
-        arguments := input.arguments
         
-        if len(arguments) == 0 do continue
+        if len(input.arguments) == 0 do continue
         
-        command := shift(&arguments)
+        command := shift(&input.arguments)
         
-        clear(&state.builtins)
+        out := strings.builder_make(state.command_allocator)
+        err := strings.builder_make(state.command_allocator)
         
-        out_sb := strings.builder_make(state.command_allocator)
-        err_sb := strings.builder_make(state.command_allocator)
+        eval(&state, command, &input, &out, &err)
         
-        if is_command(&state, "exit", command) {
-            state.exit = true
-        } else if is_command(&state, "echo", command) {
-            for arg, index in arguments {
-                if index != 0 do fmt.sbprintf(&out_sb, " ")
-                fmt.sbprintf(&out_sb, "%v", arg)
-            }
-            fmt.sbprintf(&out_sb, "\n")
-        } else if is_command(&state, "cd", command) {
-            target := shift(&arguments)
+        fmt.fprintf(input.file[.Out], "%v", strings.to_string(out))
+        fmt.fprintf(input.file[.Err], "%v", strings.to_string(err))
+    }
+}
+
+eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^strings.Builder) {
+    if is_command(state, "exit", command) {
+        state.exit = true
+    } else if is_command(state, "echo", command) {
+        for arg, index in input.arguments {
+            if index != 0 do fmt.sbprintf(output, " ")
+            fmt.sbprintf(output, "%v", arg)
+        }
+        fmt.sbprintf(output, "\n")
+    } else if is_command(state, "cd", command) {
+        target := shift(&input.arguments)
+        
+        target = parse_path(state, target)
+        
+        if os.is_directory(target) {
+            next, _ := os.clean_path(target, state.allocator)
             
-            target = parse_path(&state, target)
-            
-            if os.is_directory(target) {
-                next, _ := os.clean_path(target, state_allocator)
-                
-                delete_string(state.working_directory, state_allocator)
-                state.working_directory = next
-            } else {
-                fmt.sbprintf(&out_sb, "cd: %v: No such file or directory\n", target)
-            }
-            
-        } else if is_command(&state, "pwd", command) {
-            fmt.sbprintf(&out_sb, "%v\n", state.working_directory)
-        } else if is_command(&state, "type", command) {
-            found := false
-            
-            exe_name := shift(&arguments)
-            for it in state.builtins {
-                if it == exe_name {
-                    found = true
-                    break
-                }
-            }
-            
-            if found {
-                fmt.sbprintf(&out_sb, "%v is a shell builtin\n", exe_name)
-            } else {
-                fullpath, ok := find_in_path(exe_name)
-                if ok {
-                    fmt.sbprintf(&out_sb, "%v is %v\n", exe_name, fullpath)
-                } else {
-                    fmt.sbprintf(&out_sb, "%v: not found\n", exe_name)
-                }
-            }            
+            delete_string(state.working_directory, state.allocator)
+            state.working_directory = next
         } else {
-            exe_name := command
-            _, found := find_in_path(exe_name)
-            
-            if found {
-                exe_command: [dynamic] string // @leak
-                
-                append(&exe_command, exe_name)
-                append(&exe_command, ..arguments)
-                
-                description: os.Process_Desc
-                description.command = exe_command[:]
-                description.working_dir = state.working_directory
-                command_state, out_buffer, err_buffer, error := os.process_exec(description, state.command_allocator)
-                if error != nil {
-                    fmt.sbprintf(&err_sb, "ERROR trying to execute %v: %v\n", exe_name, error)
-                }
-                
-                out_string := transmute(string) out_buffer
-                err_string := transmute(string) err_buffer
-                
-                fmt.sbprintf(&out_sb, "%v", out_string)
-                fmt.sbprintf(&err_sb, "%v", err_string)
-            } else {
-                fmt.sbprintf(&err_sb, "%v: command not found\n", command)
+            fmt.sbprintf(output, "cd: %v: No such file or directory\n", target)
+        }
+        
+    } else if is_command(state, "pwd", command) {
+        fmt.sbprintf(output, "%v\n", state.working_directory)
+    } else if is_command(state, "jobs", command) {
+        fmt.sbprintf(output, "\n")
+    } else if is_command(state, "type", command) {
+        is_builtin := false
+        
+        exe_name := shift(&input.arguments)
+        for it in state.builtins {
+            if it == exe_name {
+                is_builtin = true
+                break
             }
         }
         
-        if strings.builder_len(out_sb) > 0 {
-            fmt.fprintf(input.file[.Out], "%v", strings.to_string(out_sb))
+        if is_builtin {
+            fmt.sbprintf(output, "%v is a shell builtin\n", exe_name)
+        } else {
+            fullpath, found := find_in_path(exe_name)
+            if found {
+                fmt.sbprintf(output, "%v is %v\n", exe_name, fullpath)
+            } else {
+                fmt.sbprintf(output, "%v: not found\n", exe_name)
+            }
         }
+    } else {
+        exe_name := command
+        _, found := find_in_path(exe_name)
         
-        if strings.builder_len(err_sb) > 0 {
-            fmt.fprintf(input.file[.Err], "%v", strings.to_string(err_sb))
+        if found {
+            exe_command := make([dynamic] string, state.command_allocator)
+            
+            append(&exe_command, exe_name)
+            append(&exe_command, ..input.arguments)
+            
+            description := os.Process_Desc {
+                command = exe_command[:],
+                working_dir = state.working_directory,
+            }
+            
+            _, out_buffer, err_buffer, exec_error := os.process_exec(description, state.command_allocator)
+            
+            if exec_error != nil {
+                fmt.sbprintf(error, "ERROR trying to execute %v: %v\n", exe_name, error)
+            }
+            
+            out_string := transmute(string) out_buffer
+            err_string := transmute(string) err_buffer
+            
+            fmt.sbprintf(output, "%v", out_string)
+            fmt.sbprintf(error, "%v", err_string)
+        } else {
+            fmt.sbprintf(error, "%v: command not found\n", command)
         }
     }
 }
@@ -162,100 +202,72 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
         Double,
     }
     
-    current:= strings.builder_make(allocator)
+    current := strings.builder_make(allocator)
     
-    skip_next: bool
     escape_next: bool
-    was_space: bool
     for r, index in input {
-        append_current: bool
-        append_rune: bool
+        action: enum { None, Append_Current, Append_Rune }
         
-        defer was_space = strings.is_space(r)
-        
-        next_rune: rune
-        if index+1 < len(input) {
-            next_rune = cast(rune) input[index+1]
-        }
-        
-        if skip_next {
-            skip_next = false
-            continue
-        } else if escape_next {
+        if escape_next {
             escape_next = false
             if quote_kind == .Double {
                 switch r {
                 case '"', '$', '\\', '`', '\n':
-                    append_rune = true
+                    action = .Append_Rune
                 }
             } else {
-                append_rune = true
+                action = .Append_Rune
             }
         } else {
             switch quote_kind {
             case .None:
                 if r == '\"' {
-                    if next_rune == '\"' {
-                        skip_next = true
-                    } else {
-                        if was_space {
-                            append_current = true
-                        }
-                        quote_kind = .Double
-                    }
+                    quote_kind = .Double
                 } else if r == '\'' {
-                    if next_rune == '\'' {
-                        skip_next = true
-                    } else {
-                        if was_space {
-                            append_current = true
-                        }
-                        quote_kind = .Single
-                    }
+                    quote_kind = .Single
                 } else if r == '\\' {
                     escape_next = true
                 } else if strings.is_space(r) {
-                    append_current = true
+                    action = .Append_Current
                 } else {
-                    append_rune = true
+                    action = .Append_Rune
                 }
                 
             case .Single:
                 if r == '\'' {
-                    if next_rune == '\'' {
-                        skip_next = true
-                    } else {
-                        quote_kind = .None
-                    }
+                    quote_kind = .None
                 } else {
-                    append_rune = true
+                    action = .Append_Rune
                 }
             
             case .Double:
                 if r == '\"' {
-                    if next_rune == '\"' {
-                        skip_next = true
-                    } else {
-                        quote_kind = .None
-                    }
+                    quote_kind = .None
                 } else if r == '\\' {
                     escape_next = true
-                } else if r == '\r' || r == '\n' {
-                    append_current = true
                 } else {
-                    append_rune = true
+                    action = .Append_Rune
                 }
             }
         }
         
-        if append_current {
+        switch action {
+        case .None: // nothing
+        
+        case .Append_Current:
             if strings.builder_len(current) != 0 {
                 append(&arguments, strings.clone(strings.to_string(current), allocator))
                 strings.builder_reset(&current)
             }
-        } else if append_rune {
+            
+        case .Append_Rune:
             strings.write_rune(&current, r)
         }
+    }
+    
+    if strings.builder_len(current) != 0 {
+        append(&arguments, strings.clone(strings.to_string(current), allocator))
+        strings.builder_reset(&current)
     }
     
     result: Input
@@ -266,39 +278,30 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
         index: [Target] int
         
         for arg, arg_index in arguments {
-            if arg == "1>" || arg == ">" {
-                if arg_index == len(arguments) -1 {
-                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
-                } else {
-                    is[.Out] = .Create
-                    index[.Out] = arg_index + 1
-                }
+            // @todo(viktor): these can be assigned multiple times in one command
+            switch arg {
+            case "1>", ">":
+                is[.Out]    = .Create
+                index[.Out] = arg_index + 1
+            
+            case "2>":
+                is[.Err]    = .Create
+                index[.Err] = arg_index + 1
+            
+            case "1>>", ">>":
+                is[.Out]    = .Append
+                index[.Out] = arg_index + 1
+            
+            case "2>>":
+                is[.Err]    = .Append
+                index[.Err] = arg_index + 1
             }
             
-            if arg == "2>" {
-                if arg_index == len(arguments) -1 {
-                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
+            if is != { .Out = .None, .Err = .None } {
+                if arg_index+1 < len(arguments) {
+                    
                 } else {
-                    is[.Err] = .Create
-                    index[.Err] = arg_index + 1
-                }
-            }
-            
-            if arg == "1>>" || arg == ">>" {
-                if arg_index == len(arguments) -1 {
                     // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
-                } else {
-                    is[.Out] = .Append
-                    index[.Out] = arg_index + 1
-                }
-            }
-            
-            if arg == "2>>" {
-                if arg_index == len(arguments) -1 {
-                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
-                } else {
-                    is[.Err] = .Append
-                    index[.Err] = arg_index + 1
                 }
             }
         }
@@ -365,7 +368,9 @@ clone_string :: proc (s: string, allocator: runtime.Allocator) -> string {
 }
 
 is_command :: proc (state: ^State, command, input: string) -> bool {
-    append(&state.builtins, command)
+    if !state.initialized {
+        append(&state.builtins, command)
+    }
     
     result: bool
     if input == command {
