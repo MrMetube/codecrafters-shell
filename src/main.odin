@@ -121,7 +121,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
     } else if is_command(state, "pwd", command) {
         fmt.sbprintf(output, "%v\n", state.working_directory)
     } else if is_command(state, "jobs", command) {
-        fmt.sbprintf(output, "\n")
+        // @todo(viktor): 
     } else if is_command(state, "type", command) {
         is_builtin := false
         
