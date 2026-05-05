@@ -68,7 +68,7 @@ main :: proc() {
                     fmt.sbprintf(&current, "%v", r)
                 }
                 
-            case .Single_Quote: // 
+            case .Single_Quote:
                 if r == '\'' {
                     if index+1 < len(input) && input[index+1] == '\'' {
                         skip_next = true
@@ -133,7 +133,7 @@ main :: proc() {
             }
             
             if found {
-                fmt.printf("%v is a shell builtin\n", arguments)
+                fmt.printf("%v is a shell builtin\n", exe_name)
             } else {
                 fullpath, ok := find_in_path(exe_name)
                 if ok {
