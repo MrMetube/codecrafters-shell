@@ -52,43 +52,62 @@ main :: proc() {
             if found {
                 fmt.printf("%v is a shell builtin\n", arguments)
             } else {
+                exe_name := chop(&arguments, " ")
                 
-                dirs: [] string
-                path_variable := os.get_env("PATH", context.temp_allocator)
-                
-                found_path: string
-                for path_variable != "" {
-                    path_separator :: ";" when ODIN_OS == .Windows else ":"
-                    
-                    dir_path, ok := chop(&path_variable, path_separator)
-                    if !ok {
-                        dir_path = path_variable
-                        path_variable = ""
-                    }
-                    
-                    dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
-                    if dir_error == nil {
-                        for info in dir_info {
-                            if (os.Permissions_Execute_All & info.mode != {}) && info.name == arguments {
-                                found_path = info.fullpath
-                            }
-                        }
-                    }
-                }
-                
-                if found_path != "" {
-                    fmt.printf("%v is %v\n", arguments, found_path)
+                fullpath, ok := find_in_path(exe_name)
+                if ok {
+                    fmt.printf("%v is %v\n", exe_name, fullpath)
                 } else {
-                    fmt.printf("%v: not found\n", arguments)
+                    fmt.printf("%v: not found\n", exe_name)
                 }
             }            
         }
         
-        
         if !handled {
-            fmt.printf("%v: command not found\n", command)
+            exe_name := chop(&arguments, " ")
+            fullpath, found := find_in_path(exe_name)
+            if found {
+                exe_command: [dynamic] string
+                append(&exe_command, fullpath)
+                for arguments != "" {
+                    append(&exe_command, chop(&arguments, " "))
+                }
+                
+                description: os.Process_Desc
+                description.command = exe_command[:]
+                description.stdout = os.stdout
+                description.stderr = os.stderr
+                description.stdin  = os.stdin
+                
+                state, out_buffer, err_buffer, error := os.process_exec(description, context.temp_allocator)
+                assert(error == nil)
+            } else {
+                fmt.printf("%v: command not found\n", command)
+            }
         }
     }
+}
+
+find_in_path :: proc (target: string) -> (string, bool) {
+    path_variable := os.get_env("PATH", context.temp_allocator)
+                
+    fullpath: string
+    for path_variable != "" {
+        path_separator :: ";" when ODIN_OS == .Windows else ":"
+        
+        dir_path := chop(&path_variable, path_separator)
+        
+        dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
+        if dir_error == nil {
+            for info in dir_info {
+                if (os.Permissions_Execute_All & info.mode != {}) && info.name == target {
+                    fullpath = info.fullpath
+                }
+            }
+        }
+    }
+    
+    return fullpath, fullpath != ""
 }
 
 is_command :: proc (builtins: ^[dynamic] string, handled: ^bool, command, input: string) -> bool {
