@@ -264,7 +264,7 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
     {
         is_append: [Target] bool
         next: [Target] bool
-        index: [Target] int
+        index: [Target] int = {.Out = -1, .Err = -1}
         
         for arg, arg_index in arguments {
             for kind in Target {
