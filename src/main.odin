@@ -66,16 +66,10 @@ main :: proc() {
                         path_variable = ""
                     }
                     
-                    fmt.eprintf("PATH dir = `%v`\n", dir_path)
-                    
                     dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
                     if dir_error == nil {
                         for info in dir_info {
-                            if (os.Permissions_Execute_All & info.mode != {}) {
-                                fmt.eprintf("exe name = `%v`\n", info.name)
-                            }
                             if (os.Permissions_Execute_All & info.mode != {}) && info.name == arguments {
-                                fmt.eprintf("perm = %v, type = %v\n", info.mode, info.type)
                                 found_path = info.fullpath
                             }
                         }
