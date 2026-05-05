@@ -52,9 +52,44 @@ main :: proc() {
             if found {
                 fmt.printf("%v is a shell builtin\n", arguments)
             } else {
-                fmt.printf("%v: not found\n", arguments)
+                
+                dirs: [] string
+                path_variable := os.get_env("PATH", context.temp_allocator)
+                
+                found_path: string
+                for path_variable != "" {
+                    path_separator :: ";" when ODIN_OS == .Windows else ":"
+                    
+                    dir_path, ok := chop(&path_variable, path_separator)
+                    if !ok {
+                        dir_path = path_variable
+                        path_variable = ""
+                    }
+                    
+                    fmt.eprintf("PATH dir = `%v`\n", dir_path)
+                    
+                    dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
+                    if dir_error == nil {
+                        for info in dir_info {
+                            if (os.Permissions_Execute_All & info.mode != {}) {
+                                fmt.eprintf("exe name = `%v`\n", info.name)
+                            }
+                            if (os.Permissions_Execute_All & info.mode != {}) && info.name == arguments {
+                                fmt.eprintf("perm = %v, type = %v\n", info.mode, info.type)
+                                found_path = info.fullpath
+                            }
+                        }
+                    }
+                }
+                
+                if found_path != "" {
+                    fmt.printf("%v is %v\n", arguments, found_path)
+                } else {
+                    fmt.printf("%v: not found\n", arguments)
+                }
             }            
         }
+        
         
         if !handled {
             fmt.printf("%v: command not found\n", command)
@@ -74,8 +109,11 @@ is_command :: proc (builtins: ^[dynamic] string, handled: ^bool, command, input:
     return result
 }
 
-chop :: proc (s: ^string, separator: string) -> string {
+chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok {
     head, match, tail := strings.partition(s^, separator)
-    s^ = tail
-    return head
+    ok := match == separator
+    if ok {
+        s^ = tail
+    }
+    return head, ok
 }
