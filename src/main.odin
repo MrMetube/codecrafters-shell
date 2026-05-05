@@ -146,17 +146,32 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
     } else if is_command(state, "pwd", command) {
         fmt.sbprintf(output, "%v\n", state.working_directory)
     } else if is_command(state, "jobs", command) {
-        for job in state.jobs[.Running] {
-            info, info_error := os.process_info_by_handle(job.process, {}, state.command_allocator)
-            if info_error != nil {
-                fmt.println("info, info_error", info, info_error)
+        #reverse for job, job_index in state.jobs[.Running] {
+            process_state, wait_error := os.process_wait(job.process, timeout = 0)
+            if wait_error != nil && wait_error != .Timeout {
+                fmt.printfln("ERROR trying to wait on %v: %v", job.process.pid, wait_error)
             }
+            
+            if process_state.exited {
+                unordered_remove(&state.jobs[.Running], job_index)
+                append(&state.jobs[.Done], job)
+            }
+        }
+        
+        for job in state.jobs[.Done] {
             icon := " "
             if job.id == state.last_used_job_id     { icon = "+" }
             if job.id == state.last_used_job_id - 1 { icon = "-" } 
-            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, "Running", job.command_line)
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, Job_State.Done, job.command_line)
         }
-        // @todo(viktor): 
+        for job in state.jobs[.Running] {
+            icon := " "
+            if job.id == state.last_used_job_id     { icon = "+" }
+            if job.id == state.last_used_job_id - 1 { icon = "-" } 
+            fmt.sbprintfln(output, "[%v]%v  %-24s%v", job.id, icon, Job_State.Running, job.command_line)
+        }
+        
+        clear(&state.jobs[.Done])
     } else if is_command(state, "type", command) {
         is_builtin := false
         
