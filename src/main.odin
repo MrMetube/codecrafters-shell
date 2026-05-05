@@ -156,7 +156,14 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             continue
         } else if escape_next {
             escape_next = false
-            append_rune = true
+            if quote_kind == .Double {
+                switch r {
+                case '"', '\\', '$', '`', '\n':
+                    append_rune = true
+                }
+            } else {
+                append_rune = true
+            }
         } else {
             switch quote_kind {
             case .None:
