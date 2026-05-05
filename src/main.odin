@@ -72,17 +72,6 @@ main :: proc() {
             
         } else if is_command(&state, "pwd", command) {
             fmt.printf("%v\n", state.working_directory)
-        } else if is_command(&state, "cat", command) {
-            for arg in arguments {
-                path := parse_path(&state, arg)
-                bytes, error := os.read_entire_file(path, state.command_allocator)
-                if error != nil {
-                    fmt.printf("Error: failed to open file `%v`: %v\n", arg, error)
-                } else {
-                    text := transmute(string) bytes
-                    fmt.printf("%v", text)
-                }
-            }
         } else if is_command(&state, "type", command) {
             found := false
             
@@ -155,9 +144,12 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
     
     skip_next: bool
     escape_next: bool
+    was_space: bool
     for r, index in input {
         append_current: bool
         append_rune: bool
+        
+        defer was_space = strings.is_space(r)
         
         if skip_next {
             skip_next = false
@@ -172,14 +164,18 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
                     if index+1 < len(input) && input[index+1] == '\"' {
                         skip_next = true
                     } else {
-                        append_current = true
+                        if was_space {
+                            append_current = true
+                        }
                         quote_kind = .Double
                     }
                 } else if r == '\'' {
                     if index+1 < len(input) && input[index+1] == '\'' {
                         skip_next = true
                     } else {
-                        append_current = true
+                        if was_space {
+                            append_current = true
+                        }
                         quote_kind = .Single
                     }
                 } else if r == '\\' {
