@@ -45,7 +45,9 @@ main :: proc() {
         } else if is_command(&state, "cd", command) {
             target := chop(&arguments, " ")
             
-            if !os.is_absolute_path(target) {
+            if target == "~" {
+                target, _ = os.user_home_dir(context.temp_allocator)
+            } else if !os.is_absolute_path(target) {
                 target, _ = os.join_path({state.working_directory, target}, context.temp_allocator)
             }
             
