@@ -188,7 +188,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                 
                 process, start_error := os.process_start(description)
                 info, _ := os.process_info_by_handle(process, {.PPid}, context.temp_allocator)
-                info.ppid
+                
                 if start_error != nil {
                     fmt.sbprintf(error, "ERROR trying to start %v: %v\n", exe_name, error)
                 }
