@@ -21,11 +21,10 @@ main :: proc() {
     buffer: [256] u8
     
     command_allocator := context.temp_allocator
-    state_allocator := context.allocator
+    state_allocator   := context.allocator
     
     state: State
     state.working_directory, _ = os.get_working_directory(state_allocator)
-    
     
     for !state.exit {
         free_all(command_allocator)
@@ -38,8 +37,6 @@ main :: proc() {
             fmt.panicf("ERROR: failed to read into buffer:%v\n", read_error)
         }
         input := transmute(string) buffer[:read_bytes]
-        
-        
         
         arguments := parse_arguments(input, command_allocator)
         
@@ -128,9 +125,10 @@ main :: proc() {
 
 parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] string {
     arguments := make([dynamic] string, allocator)
-    parse_state: enum {
-        Default,
-        Single_Quote,
+    quote_kind: enum {
+        None,
+        Single,
+        Double,
     }
     
     current:= strings.builder_make(allocator)
@@ -142,40 +140,60 @@ parse_arguments :: proc (input: string, allocator: runtime.Allocator) -> [] stri
             continue
         }
         
-        switch parse_state {
-        case .Default:
-            if r == '\'' {
+        append_current: bool
+        switch quote_kind {
+        case .None:
+            if r == '\"' {
+                if index+1 < len(input) && input[index+1] == '\"' {
+                    skip_next = true
+                } else {
+                    append_current = true
+                    quote_kind = .Double
+                }
+            } else if r == '\'' {
                 if index+1 < len(input) && input[index+1] == '\'' {
                     skip_next = true
                 } else {
-                    if strings.builder_len(current) != 0 {
-                        append(&arguments, strings.clone(strings.to_string(current), allocator))
-                        strings.builder_reset(&current)
-                    }
-                    parse_state = .Single_Quote
+                    append_current = true
+                    quote_kind = .Single
                 }
             } else if strings.is_space(r) {
-                if strings.builder_len(current) != 0 {
-                    append(&arguments, strings.clone(strings.to_string(current), allocator))
-                    strings.builder_reset(&current)
-                }
+                append_current = true
             } else {
                 fmt.sbprintf(&current, "%v", r)
             }
             
-        case .Single_Quote:
+        case .Single:
             if r == '\'' {
                 if index+1 < len(input) && input[index+1] == '\'' {
                     skip_next = true
                 } else {
-                    if strings.builder_len(current) != 0 {
-                        append(&arguments, strings.clone(strings.to_string(current), allocator))
-                        strings.builder_reset(&current)
-                    }
-                    parse_state = .Default
+                    append_current = true
+                    quote_kind = .None
                 }
             } else {
                 fmt.sbprintf(&current, "%v", r)
+            }
+        
+        case .Double:
+            if r == '\"' {
+                if index+1 < len(input) && input[index+1] == '\"' {
+                    skip_next = true
+                } else {
+                    append_current = true
+                    quote_kind = .None
+                }
+            } else if r == '\r' || r == '\n' {
+                append_current = true
+            } else {
+                fmt.sbprintf(&current, "%v", r)
+            }
+        }
+        
+        if append_current {
+            if strings.builder_len(current) != 0 {
+                append(&arguments, strings.clone(strings.to_string(current), allocator))
+                strings.builder_reset(&current)
             }
         }
     }
