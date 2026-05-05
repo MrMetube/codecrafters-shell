@@ -45,18 +45,17 @@ main :: proc() {
         } else if is_command(&state, "cd", command) {
             target := chop(&arguments, " ")
             
-            next: string
             if !os.is_absolute_path(target) {
-                next, _ = os.join_path({state.working_directory, target}, context.temp_allocator)
+                target, _ = os.join_path({state.working_directory, target}, context.temp_allocator)
             }
             
-            if os.is_directory(next) {
-                next, _ = os.clean_path(next, context.allocator)
+            if os.is_directory(target) {
+                next, _ := os.clean_path(target, context.allocator)
                 
                 delete_string(state.working_directory)
                 state.working_directory = next
             } else {
-                fmt.printf("cd: %v: No such file or directory\n", next)
+                fmt.printf("cd: %v: No such file or directory\n", target)
             }
             
         } else if is_command(&state, "pwd", command) {
