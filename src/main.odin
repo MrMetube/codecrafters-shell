@@ -17,8 +17,7 @@ State :: struct {
     
     builtins: [dynamic] string,
     
-    first_free_job: int,
-    _jobs: [dynamic] Job
+    jobs: [dynamic] Job
 }
 
 Input :: struct {
@@ -33,8 +32,6 @@ Job :: struct {
     state: Job_State,
     process: os.Process,
     command_line: string,
-    
-    next_free: int,
 }
 
 Job_State :: enum {
@@ -44,7 +41,6 @@ Job_State :: enum {
 }
 
 Eval_Result :: struct {
-    did_reap_jobs: bool
 }
 
 state_init :: proc (state: ^State) {
@@ -54,7 +50,7 @@ state_init :: proc (state: ^State) {
     state.working_directory, _ = os.get_working_directory(state.allocator)
     
     state.builtins = make([dynamic] string, state.allocator)
-    state._jobs = make([dynamic] Job, 1, state.allocator)
+    state.jobs = make([dynamic] Job, state.allocator)
     
     clear(&state.builtins)
     dummy := strings.builder_make(context.temp_allocator)
@@ -74,6 +70,12 @@ main :: proc () {
     
     for !state.exit {
         free_all(state.command_allocator)
+        
+        {
+            out := strings.builder_make(state.command_allocator)
+            reap_jobs_and_print(&state, &out, show_running = false)
+            fmt.printf("%v", strings.to_string(out))
+        }
         
         fmt.printf("$ ")
         
@@ -120,20 +122,14 @@ main :: proc () {
         out := strings.builder_make(state.command_allocator)
         err := strings.builder_make(state.command_allocator)
         
-        result := eval(&state, command, &input, &out, &err)
-        
-        if !result.did_reap_jobs {
-            reap_jobs_and_print(&state, &out, show_running = false)
-        }
+        eval(&state, command, &input, &out, &err)
         
         fmt.fprintf(input.file[.Out], "%v", strings.to_string(out))
         fmt.fprintf(input.file[.Err], "%v", strings.to_string(err))
     }
 }
 
-eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^strings.Builder) -> Eval_Result {
-    result: Eval_Result
-    
+eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^strings.Builder) {
     if is_command(state, "exit", command) {
         state.exit = true
     } else if is_command(state, "echo", command) {
@@ -160,7 +156,6 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
         fmt.sbprintf(output, "%v\n", state.working_directory)
     } else if is_command(state, "jobs", command) {
         reap_jobs_and_print(state, output, show_running = true)
-        result.did_reap_jobs = true
     } else if is_command(state, "type", command) {
         is_builtin := false
         
@@ -208,24 +203,28 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                     fmt.sbprintf(error, "ERROR trying to start %v: %v\n", exe_name, error)
                 }
                 
-                id: int
-                if state.first_free_job != 0 {
-                    id = state.first_free_job
-                    state.first_free_job = state._jobs[state.first_free_job].next_free
-                    job := &state._jobs[id]
-                    delete(job.command_line, state.allocator)
-                } else {
-                    id = len(state._jobs)
-                    append_nothing(&state._jobs)
+                index := -1
+                for job, job_index in state.jobs {
+                    if job.state == .Unused {
+                        index = job_index
+                        delete(job.command_line, state.allocator)
+                        break
+                    }
                 }
                 
-                job := &state._jobs[id]
+                if index == -1 {
+                    index = len(state.jobs)
+                    append_nothing(&state.jobs)
+                }
+                
+                job := &state.jobs[index]
                 job^ = {
                     state = .Running,
                     process = process,
                     command_line = strings.join(exe_command[:], " ", state.allocator),
                 }
                 
+                id := index + 1
                 fmt.sbprintfln(output, "[%v] %v", id, process.pid)
             } else {
                 _, out_buffer, err_buffer, exec_error := os.process_exec(description, state.command_allocator)
@@ -244,8 +243,6 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
             fmt.sbprintf(error, "%v: command not found\n", command)
         }
     }
-    
-    return result
 }
 
 parse_path :: proc (state: ^State, target: string) -> string {
@@ -261,20 +258,33 @@ parse_path :: proc (state: ^State, target: string) -> string {
 
 reap_jobs_and_print :: proc (state: ^State, output: ^strings.Builder, show_running := false) {
     high_job_ids: [2] int
-    for &job, id in state._jobs {
+    for &job, index in state.jobs {
         if job.state == .Unused do continue
         
         process_state, wait_error := os.process_wait(job.process, timeout = 0)
+        done: bool
         if wait_error != nil && wait_error != .Timeout {
-            fmt.printfln("ERROR trying to wait on %v: %v", job.process.pid, wait_error)
+            ok := false
+            when ODIN_OS == .Linux {
+                if wait_error == os.Platform_Error.ECHILD {
+                    ok = true
+                }
+            }
+            
+            if !ok {
+                fmt.panicf("Error when waiting on pid %v: %v : %v\n", job.process.pid, wait_error, os.error_string(wait_error))
+            }
         }
         
-        if process_state.exited {
+        if (wait_error == .Timeout || wait_error == nil) && process_state.exited {
+            done = true
+        }
+        
+        if done {
             job.state = .Done
-            job.next_free = state.first_free_job
-            state.first_free_job = id
         }
         
+        id := index + 1
         if id > high_job_ids[0] {
             high_job_ids[1] = high_job_ids[0]
             high_job_ids[0] = id
@@ -283,9 +293,10 @@ reap_jobs_and_print :: proc (state: ^State, output: ^strings.Builder, show_runni
         }
     }
     
-    for job, id in state._jobs {
+    for &job, index in state.jobs {
         if job.state == .Unused do continue
         
+        id := index + 1
         icon := " "
         if id == high_job_ids[0] { icon = "+" }
         if id == high_job_ids[1] { icon = "-" } 
@@ -295,6 +306,10 @@ reap_jobs_and_print :: proc (state: ^State, output: ^strings.Builder, show_runni
         
         if print {
             fmt.sbprintfln(output, "[%v]%v  %-24s%v", id, icon, job.state, job.command_line)
+        }
+        
+        if job.state == .Done {
+            job.state = .Unused
         }
     }
 }
