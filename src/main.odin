@@ -192,6 +192,7 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
                 working_dir = state.working_directory,
             }
             
+            // @leak input.file handles
             if input.background {
                 description.stdout = input.file[.Out]
                 description.stderr = input.file[.Err]
@@ -246,11 +247,13 @@ eval :: proc (state: ^State, command: string, input: ^Input, output, error: ^str
 }
 
 parse_path :: proc (state: ^State, target: string) -> string {
-    result := target
+    result: string
     if target == "~" {
         result, _ = os.user_home_dir(state.command_allocator)
     } else if !os.is_absolute_path(target) {
         result, _ = os.join_path({state.working_directory, target}, state.command_allocator)
+    } else {
+        result = strings.clone(target)
     }
     
     return result
@@ -314,23 +317,37 @@ reap_jobs_and_print :: proc (state: ^State, output: ^strings.Builder, show_runni
     }
 }
 
-parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Allocator) -> Input {
-    arguments := make([dynamic] string, allocator)
-    quote_kind: enum {
+Parser :: struct {
+    state: enum {
         None,
         Single,
         Double,
-    }
+        Redirection,
+        Background,
+    },
+    
+    redirection_target: Target,
+    redirection_kind: enum { Create, Append },
+}
+
+parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Allocator) -> Input {
+    arguments := make([dynamic] string, allocator)
+    parser: Parser
+    
+    escape_next: bool
     
     current := strings.builder_make(allocator)
     
-    escape_next: bool
+    result: Input
+    result.file[.Out] = os.stdout
+    result.file[.Err] = os.stderr
+    
     for r, index in input {
         action: enum { None, Append_Current, Append_Rune }
         
         if escape_next {
             escape_next = false
-            if quote_kind == .Double {
+            if parser.state == .Double {
                 switch r {
                 case '"', '$', '\\', '`', '\n':
                     action = .Append_Rune
@@ -339,12 +356,14 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
                 action = .Append_Rune
             }
         } else {
-            switch quote_kind {
-            case .None:
+            switch parser.state {
+            case .Background:
+                fmt.panicf("ERROR content after '&': `%v`\n", input[index:]) 
+            case .None, .Redirection:
                 if r == '\"' {
-                    quote_kind = .Double
+                    parser.state = .Double
                 } else if r == '\'' {
-                    quote_kind = .Single
+                    parser.state = .Single
                 } else if r == '\\' {
                     escape_next = true
                 } else if strings.is_space(r) {
@@ -355,14 +374,14 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
                 
             case .Single:
                 if r == '\'' {
-                    quote_kind = .None
+                    parser.state = .None
                 } else {
                     action = .Append_Rune
                 }
             
             case .Double:
                 if r == '\"' {
-                    quote_kind = .None
+                    parser.state = .None
                 } else if r == '\\' {
                     escape_next = true
                 } else {
@@ -375,87 +394,76 @@ parse_arguments :: proc (state: ^State, input: string, allocator: runtime.Alloca
         case .None: // nothing
         
         case .Append_Current:
-            if strings.builder_len(current) != 0 {
-                append(&arguments, strings.clone(strings.to_string(current), allocator))
-                strings.builder_reset(&current)
-            }
+            append_arg(state, &parser, &arguments, &current, &result, allocator)
             
         case .Append_Rune:
             strings.write_rune(&current, r)
         }
     }
     
-    if strings.builder_len(current) != 0 {
-        append(&arguments, strings.clone(strings.to_string(current), allocator))
-        strings.builder_reset(&current)
-    }
+    // @todo(viktor): incomplete redirection missing target param
+    append_arg(state, &parser, &arguments, &current, &result, allocator)
     
-    result: Input
-    result.file[.Out] = os.stdout
-    result.file[.Err] = os.stderr
-    {
-        is:    [Target] enum { None, Create, Append }
-        index: [Target] int
-        
-        for arg, arg_index in arguments {
-            // @todo(viktor): these can be assigned multiple times in one command
-            switch arg {
-            case "1>", ">":
-                is[.Out]    = .Create
-                index[.Out] = arg_index + 1
-            
-            case "2>":
-                is[.Err]    = .Create
-                index[.Err] = arg_index + 1
-            
-            case "1>>", ">>":
-                is[.Out]    = .Append
-                index[.Out] = arg_index + 1
-            
-            case "2>>":
-                is[.Err]    = .Append
-                index[.Err] = arg_index + 1
-            }
-            
-            if is != { .Out = .None, .Err = .None } {
-                if arg_index+1 < len(arguments) {
-                    
-                } else {
-                    // @todo(viktor): Error: something like pwsh's: Missing file specification after redirection operator.
-                }
-            }
-        }
-        
-        for kind in Target {
-            if is[kind] != .None {
-                index := index[kind]
-                
-                path := parse_path(state, arguments[index])
-                
-                flags := os.File_Flags{ .Read, .Write, .Create }
-                if is[kind] == .Append {
-                    flags += { .Append }
-                } else {
-                    assert(is[kind] == .Create)
-                    flags += { .Trunc }
-                }
-                
-                // @todo(viktor): handle the error
-                result.file[kind], _ = os.open(path, flags) 
-                
-                remove_range(&arguments, index-1, index+1)
-            }
-        }
-        
-        if arguments[len(arguments)-1] == "&" {
-            result.background = true
-            ordered_remove(&arguments, len(arguments)-1)
-        }
+    assert(parser.state != .Redirection)
+    
+    if parser.state == .Background {
+        result.background = true
     }
     
     result.arguments = arguments[:]
     
     return result
+}
+
+append_arg :: proc (state: ^State, parser: ^Parser, arguments: ^[dynamic] string, current: ^strings.Builder, result: ^Input, allocator: runtime.Allocator) {
+    if strings.builder_len(current^) != 0 {
+        if parser.state == .Redirection {
+            parser.state = .None
+            
+            current_string := strings.to_string(current^)
+            defer strings.builder_reset(current)
+            
+            path := parse_path(state, current_string)
+            
+            flags := os.File_Flags{ .Read, .Write, .Create }
+            switch parser.redirection_kind {
+                case .Create: flags += { .Trunc }
+                case .Append: flags += { .Append }
+            }
+            
+            // @todo(viktor): handle the error
+            result.file[parser.redirection_target], _ = os.open(path, flags) 
+        } else {
+            current_string := strings.to_string(current^)
+            defer strings.builder_reset(current)
+            
+            switch current_string {
+            case "1>", ">":
+                parser.state = .Redirection
+                parser.redirection_target = .Out
+                parser.redirection_kind   = .Create
+                
+            case "2>":
+                parser.state = .Redirection
+                parser.redirection_target = .Err
+                parser.redirection_kind   = .Create
+                
+            case "1>>", ">>":
+                parser.state = .Redirection
+                parser.redirection_target = .Out
+                parser.redirection_kind   = .Append
+                
+            case "2>>":
+                parser.state = .Redirection
+                parser.redirection_target = .Err
+                parser.redirection_kind   = .Append
+            case "&":
+                parser.state = .Background
+            case:
+                append(arguments, strings.clone(strings.to_string(current^), allocator))
+            }
+        }
+    }
 }
 
 find_in_path :: proc (target: string) -> (string, bool) {
