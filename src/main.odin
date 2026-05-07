@@ -160,39 +160,31 @@ main :: proc () {
                     break task
                 }
                 
+                if command_is_builtin(&state, second) {
+                    if command_is_builtin(&state, first) {
+                        eval_builtin(&state, first, &output, &_error)
+                    } else {
+                        execute_command(&state, pipeline, first, &output)
+                    }
+                    
+                    first_output := strings.to_string(output)
+                    append(&second.arguments, strings.clone(first_output, state.command_allocator))
+                    strings.builder_reset(&output)
+                        
+                    eval_builtin(&state, second, &output, &_error)
+                    fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
+                    fmt.fprintf(pipeline.error,  "%v", strings.to_string(_error))
+                    break task
+                }
+                
                 second_in, first_out, pipe_error := os.pipe()
                 assert(pipe_error == nil)
                 
                 if command_is_builtin(&state, first) {
-                    eval_builtin(&state, first, &output, &_error)
-                    
                     first_output := strings.to_string(output)
-                    
-                    if command_is_builtin(&state, second) {
-                        append(&second.arguments, strings.clone(first_output, state.command_allocator))
-                        strings.builder_reset(&output)
-                        
-                        eval_builtin(&state, second, &output, &_error)
-                        fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
-                        fmt.fprintf(pipeline.error,  "%v", strings.to_string(_error))
-                        break task
-                    }
-                    
                     os.write_string(first_out, first_output)
+                    strings.builder_reset(&output)
                 } else {
-                    if command_is_builtin(&state, second) {
-                        execute_command(&state, pipeline, first, &output)
-                        
-                        first_output := strings.to_string(output)
-                        append(&second.arguments, strings.clone(first_output, state.command_allocator))
-                        strings.builder_reset(&output)
-                        
-                        eval_builtin(&state, second, &output, &_error)
-                        fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
-                        fmt.fprintf(pipeline.error,  "%v", strings.to_string(_error))
-                        break task
-                    }
-                    
                     start_command(&state, pipeline, first, { stdout = first_out })
                 }
                 os.close(first_out)
