@@ -138,10 +138,9 @@ main :: proc () {
         pipeline := parse_arguments(&state, input_text, &cmd_buf, state.command_allocator)
         // assert that command's arguments are not empty
         
+        output := os.to_writer(pipeline.output)
+        error  := os.to_writer(pipeline.error)
         if len(pipeline.commands) == 1 {
-            output := os.to_writer(pipeline.output)
-            error  := os.to_writer(pipeline.error)
-            
             command := &pipeline.commands[0]
             if command.is_builtin {
                 eval_builtin(&state, command^, output, error)
@@ -149,55 +148,113 @@ main :: proc () {
                 eval_command(&state, pipeline, command, output)
             }
         } else if len(pipeline.commands) == 2 {
-            output := os.to_writer(pipeline.output)
-            error  := os.to_writer(pipeline.error)
+            valid := true
+            for c in pipeline.commands {
+                if !command_valid(error, c) {
+                    valid = false
+                }
+            }
             
-            first  := pipeline.commands[0]
-            second := pipeline.commands[1]
-            
-            task: {
-                if !first.is_builtin  && !command_is_in_path(pipeline, first)  { break task }
-                if !second.is_builtin && !command_is_in_path(pipeline, second) { break task }
+            if valid {
+                first  := pipeline.commands[0]
+                second := pipeline.commands[1]
                 
-                second_in, first_out, pipe_error := os.pipe()
+                pipe_input, pipe_output, pipe_error := os.pipe()
                 assert(pipe_error == nil)
                 
                 if first.is_builtin {
                     // @todo(viktor): just using the first_out pipe-end causes an infinite stall/hang
-                    _output := strings.builder_make(state.command_allocator)
-                    eval_builtin(&state, first, strings.to_writer(&_output), error)
-                    os.write_string(first_out, strings.to_string(_output))
+                    this_output := strings.builder_make(state.command_allocator)
+                    eval_builtin(&state, first, strings.to_writer(&this_output), error)
+                    os.write_string(pipe_output, strings.to_string(this_output))
                 } else {
-                    start_command(&state, &first, { stdout = first_out }, error)
+                    start_command(&state, &first, { stdout = pipe_output }, error)
                 }
-                os.close(first_out)
+                os.close(pipe_output)
                 
                 if second.is_builtin {
-                    _output := strings.builder_make(state.command_allocator)
-                    pipe_read_all(&_output, second_in)
+                    prev_output := strings.builder_make(state.command_allocator)
+                    pipe_read_all(&prev_output, pipe_input)
                     
                     if !first.is_builtin {
                         _, _ = os.process_wait(first.process)
                     }
                     
-                    first_output := strings.to_string(_output)
-                    append(&second.arguments, strings.clone(first_output, state.command_allocator))
+                    append(&second.arguments, strings.clone(strings.to_string(prev_output), state.command_allocator))
                         
                     eval_builtin(&state, second, output, error)
                 } else {
-                    eval_command(&state, pipeline, &second, output, second_in)
+                    eval_command(&state, pipeline, &second, output, pipe_input)
                 }
             }
         } else {
-            unimplemented()
+            valid := true
+            for c in pipeline.commands {
+                if !command_valid(error, c) {
+                    valid = false
+                }
+            }
+            
+            if valid {
+                Pipe :: struct {
+                    input:  ^os.File,
+                    output: ^os.File,
+                }
+                
+                pipes := make([] Pipe, len(pipeline.commands), state.command_allocator)
+                
+                for index in 0..<len(pipeline.commands)-1 {
+                    r, w, pipe_error  := os.pipe()
+                    assert(pipe_error == nil)
+                    pipes[index].output  = w
+                    pipes[index+1].input = r
+                }
+                
+                for &command, index in pipeline.commands {
+                    pipe := pipes[index]
+                    
+                    if command.is_builtin {
+                        if index > 0 {
+                            prev    := pipeline.commands[index-1]
+                            prev_in := pipes[index-1].input
+                            prev_output := strings.builder_make(state.command_allocator)
+                            pipe_read_all(&prev_output, prev_in)
+                            
+                            if !prev.is_builtin {
+                                _, _ = os.process_wait(prev.process)
+                            }
+                            
+                            append(&command.arguments, strings.clone(strings.to_string(prev_output), state.command_allocator))
+                        }
+                        
+                        if index < len(pipeline.commands)-1 {
+                            // @todo(viktor): just using the c2_out pipe-end causes an infinite stall/hang
+                            this_output := strings.builder_make(state.command_allocator)
+                            eval_builtin(&state, command, strings.to_writer(&this_output), error)
+                            os.write_string(pipe.output, strings.to_string(this_output))
+                        } else {
+                            eval_builtin(&state, command, output, error)
+                        }
+                    } else {
+                        if index < len(pipes)-1 {
+                            start_command(&state, &command, { stdout = pipe.output, stdin = pipe.input }, error)
+                        } else {
+                            eval_command(&state, pipeline, &command, output, pipe.input)
+                        }
+                    }
+                    
+                    os.close(pipe.output)
+                }
+            }
         }
     }
 }
 
 eval_command :: proc (state: ^State, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
-    if !command_is_in_path(pipeline, command^) { return }
+    error := os.to_writer(pipeline.error)
+    if !command_is_in_path(error, command^) { return }
     
-    start_command(state, command, { stdout = pipeline.output, stderr = pipeline.error, stdin = input }, os.to_writer(pipeline.error))
+    start_command(state, command, { stdout = pipeline.output, stderr = pipeline.error, stdin = input }, error)
     
     if !pipeline.background {
         _, wait_error := os.process_wait(command.process)
@@ -326,20 +383,6 @@ is_builtin :: proc (state: ^State, command, input: string) -> bool {
     result: bool
     if input == command {
         result = true
-    }
-    
-    return result
-}
-
-command_is_builtin :: proc (state: ^State, command: Command) -> bool {
-    name := command.arguments[0]
-    result: bool
-    
-    for builtin in state.builtins {
-        if builtin == name {
-            result = true
-            break
-        }
     }
     
     return result
@@ -498,6 +541,20 @@ parse_command :: proc (parser: ^Parser) -> Command {
     return command
 }
 
+command_is_builtin :: proc (state: ^State, command: Command) -> bool {
+    name := command.arguments[0]
+    result: bool
+    
+    for builtin in state.builtins {
+        if builtin == name {
+            result = true
+            break
+        }
+    }
+    
+    return result
+}
+
 parse_redirection :: proc (parser: ^Parser, pipeline: ^Pipeline, kind: Redirection_Kind, target: Target) {
     arg := parse_string(parser)
     // @todo(viktor): handle empty result
@@ -591,6 +648,8 @@ parse_string :: proc (parser: ^Parser) -> string {
 
 ////////////////////////////////////////////////
 
+command_valid :: proc (error: io.Writer, command: Command) -> bool { return command.is_builtin || command_is_in_path(error, command) } 
+
 find_in_path :: proc (target: string) -> (string, bool) {
     path_variable := os.get_env("PATH", context.temp_allocator)
                 
@@ -617,12 +676,12 @@ find_in_path :: proc (target: string) -> (string, bool) {
     return fullpath, ok
 }
 
-command_is_in_path :: proc (pipeline: Pipeline, command: Command) -> bool {
+command_is_in_path :: proc (error: io.Writer, command: Command) -> bool {
     name := command.arguments[0]
     
     _, result := find_in_path(name)
     if !result {
-        fmt.fprintf(pipeline.error, "%v: command not found\n", name)
+        fmt.wprintfln(error, "%v: command not found", name)
     }
     return result
 }
