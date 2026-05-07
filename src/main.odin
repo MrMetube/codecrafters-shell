@@ -29,7 +29,7 @@ Pipeline :: struct {
 }
 
 Command :: struct {
-    arguments: [] string,
+    arguments: [dynamic] string,
 }
 
 Target :: enum { Out, Err }
@@ -68,10 +68,12 @@ state_init :: proc (state: ^State) {
     state.jobs     = make([dynamic] Job, state.allocator)
     
     clear(&state.builtins)
+    
     dummy := strings.builder_make(context.temp_allocator)
     command: Command
-    command.arguments = {""}
-    eval(state, command, &dummy, &dummy, false)
+    command.arguments = make([dynamic] string, context.temp_allocator)
+    append(&command.arguments, "")
+    eval_builtin(state, command, &dummy, &dummy)
     
     state.initialized = true
 }
@@ -135,69 +137,95 @@ main :: proc () {
         // assert that command's arguments are not empty
         
         output := strings.builder_make(state.command_allocator)
-        error  := strings.builder_make(state.command_allocator)
+        _error  := strings.builder_make(state.command_allocator)
                 
         if len(pipeline.commands) == 1 {
             command := pipeline.commands[0]
             
-            if pipeline.background {
-                // @leak pipeline's ^os.File handles
-                eval(&state, command, &output, &error, true, pipeline.output, pipeline.error)
-            } else {
-                eval(&state, command, &output, &error, false)
+            handled := eval_builtin(&state, command, &output, &_error)
+            if !handled {
+                eval_command(&state, pipeline, command, &output)
             }
+            
             fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
-            fmt.fprintf(pipeline.error,  "%v", strings.to_string(error))
         } else if len(pipeline.commands) == 2 {
             first  := pipeline.commands[0]
             second := pipeline.commands[1]
             
-            first_name  := first.arguments[0]
-            second_name := second.arguments[0]
-            
-            _, first_found  := find_in_path(first_name)
-            _, second_found := find_in_path(second_name)
-            
-            if !first_found {
-                fmt.sbprintf(&error, "%v: command not found\n", first_name)
-            } else {
-                if !second_found {
-                    fmt.sbprintf(&error, "%v: command not found\n", second_name)
-                } else {
-                    second_in, first_out, pipe_error := os.pipe()
-                    assert(pipe_error == nil)
-                    
-                    second_process := start_command(&state, second, &error, { stdin = second_in, stdout = pipeline.output, stderr = pipeline.error })
-                    start_command(&state,  first, &error, { stdout = first_out })
-                    os.close(second_in)
-                    os.close(first_out)
-                    
-                    _, wait_error := os.process_wait(second_process)
-                    assert(wait_error == nil)
+            task: {
+                if !command_is_builtin(&state, first) && !command_is_in_path(pipeline, first) {
+                    break task
                 }
+                if !command_is_builtin(&state, second) && !command_is_in_path(pipeline, second) {
+                    break task
+                }
+                
+                second_in, first_out, pipe_error := os.pipe()
+                assert(pipe_error == nil)
+                
+                if command_is_builtin(&state, first) {
+                    eval_builtin(&state, first, &output, &_error)
+                    
+                    first_output := strings.to_string(output)
+                    
+                    if command_is_builtin(&state, second) {
+                        append(&second.arguments, strings.clone(first_output, state.command_allocator))
+                        strings.builder_reset(&output)
+                        
+                        eval_builtin(&state, second, &output, &_error)
+                        fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
+                        fmt.fprintf(pipeline.error,  "%v", strings.to_string(_error))
+                        break task
+                    }
+                    
+                    os.write_string(first_out, first_output)
+                } else {
+                    if command_is_builtin(&state, second) {
+                        execute_command(&state, pipeline, first, &output)
+                        
+                        first_output := strings.to_string(output)
+                        append(&second.arguments, strings.clone(first_output, state.command_allocator))
+                        strings.builder_reset(&output)
+                        
+                        eval_builtin(&state, second, &output, &_error)
+                        fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
+                        fmt.fprintf(pipeline.error,  "%v", strings.to_string(_error))
+                        break task
+                    }
+                    
+                    start_command(&state, pipeline, first, { stdout = first_out })
+                }
+                os.close(first_out)
+                
+                second_params := os.Process_Desc { 
+                    stdin  = second_in,
+                    stdout = pipeline.output, 
+                    stderr = pipeline.error,
+                }
+                
+                second_process := start_command(&state, pipeline, second, second_params)
+                os.close(second_in)
+                
+                // @todo(viktor): last may be in background
+                _, wait_error := os.process_wait(second_process)
+                assert(wait_error == nil)
             }
-            
-            fmt.fprintf(pipeline.error,  "%v", strings.to_string(error))
         } else {
             unimplemented()
         }
     }
 }
 
-eval :: proc (state: ^State, command: Command, output, error: ^strings.Builder, is_background: bool, bg_output: ^os.File = nil, bg_error: ^os.File = nil) {
-    command_name := command.arguments[0]
+eval_command :: proc (state: ^State, pipeline: Pipeline, command: Command, output: ^strings.Builder) {
+    if !command_is_in_path(pipeline, command) { return }
     
-    handled := eval_builtin(state, command_name, command.arguments[1:], output, error)
-    if handled { return }
+    process := start_command(state, pipeline, command, { stdout = pipeline.output, stderr = pipeline.error })
     
-    _, found := find_in_path(command_name)
-    if !found {
-        fmt.sbprintf(error, "%v: command not found\n", command_name)
-        return
-    }
-    
-    if is_background {
-        process := start_command(state, command, error, { stdout = bg_output, stderr = bg_error })
+    if !pipeline.background {
+        _, wait_error := os.process_wait(process)
+        assert(wait_error == nil)
+    } else {
+        // @leak pipeline's ^os.File handles
         
         index := -1
         for job, job_index in state.jobs {
@@ -218,50 +246,133 @@ eval :: proc (state: ^State, command: Command, output, error: ^strings.Builder, 
             state = .Running,
             process = process,
             // @todo(viktor): quote args with a space
-            command_line = strings.join(command.arguments, " ", state.allocator),
+            command_line = strings.join(command.arguments[:], " ", state.allocator),
         }
         
         id := index + 1
         fmt.sbprintfln(output, "[%v] %v", id, process.pid)
-    } else {
-        execute_command(state, command, output, error)
     }
 }
 
-start_command :: proc (state: ^State, command: Command, err_buffer: ^strings.Builder, params: os.Process_Desc = {}) -> os.Process {
+start_command :: proc (state: ^State, pipeline: Pipeline, command: Command, params: os.Process_Desc = {}) -> os.Process {
     params := params
-    params.command = command.arguments
+    params.command = command.arguments[:]
     params.working_dir = state.working_directory
     
     process, start_error := os.process_start(params)
     if start_error != nil {
         command_name := command.arguments[0]
-        fmt.sbprintf(err_buffer, "ERROR trying to start %v: %v\n", command_name, start_error)
+        fmt.fprintf(pipeline.error, "ERROR trying to start %v: %v\n", command_name, start_error)
     }
     
     return process
 }
 
-execute_command :: proc (state: ^State, command: Command, output, error: ^strings.Builder, input: ^os.File = nil) {
+execute_command :: proc (state: ^State, pipeline: Pipeline, command: Command, output: ^strings.Builder, input: ^os.File = nil) {
     command_name := command.arguments[0]
     
-    _, out_buffer, error_buffer, exec_error := os.process_exec({
-        command     = command.arguments,
+    out_buffer, error_buffer, exec_error := process_exec({
+        command     = command.arguments[:],
         working_dir = state.working_directory,
         stdin       = input,
     }, state.command_allocator)
     
     if exec_error != nil {
-        fmt.sbprintf(error, "ERROR trying to exec %v: %v\n", command_name, exec_error)
+        fmt.fprintf(pipeline.error, "ERROR trying to exec %v: %v\n", command_name, exec_error)
         return
     }
     
     fmt.sbprintf(output, "%v", transmute(string) out_buffer)
-    fmt.sbprintf(error,  "%v", transmute(string) error_buffer)
+    fmt.fprintf(pipeline.error,  "%v", transmute(string) error_buffer)
 }
 
-eval_builtin :: proc (state: ^State, command_name: string, arguments: [] string, output, error: ^strings.Builder) -> bool {
-    arguments := arguments
+process_exec :: proc (desc: os.Process_Desc, allocator: runtime.Allocator, loc := #caller_location) -> (stdout: []byte, stderr: []byte, err: os.Error) {
+	assert(desc.stdout == nil, "Cannot redirect stdout when it's being captured", loc)
+	assert(desc.stderr == nil, "Cannot redirect stderr when it's being captured", loc)
+
+	stdout_r, stdout_w := os.pipe() or_return
+	defer os.close(stdout_r)
+	stderr_r, stderr_w := os.pipe() or_return
+	defer os.close(stderr_r)
+
+	process: os.Process
+	{
+		// NOTE(flysand): Make sure the write-ends are closed, regardless
+		// of the outcome. This makes read-ends readable on our side.
+		defer os.close(stdout_w)
+		defer os.close(stderr_w)
+		desc := desc
+		desc.stdout = stdout_w
+		desc.stderr = stderr_w
+		process = os.process_start(desc) or_return
+	}
+
+	{
+		stdout_b: [dynamic]byte
+		stdout_b.allocator = allocator
+
+		stderr_b: [dynamic]byte
+		stderr_b.allocator = allocator
+
+		buf: [1024]u8 = ---
+		
+		stdout_done, stderr_done, has_data: bool
+		for err == nil && (!stdout_done || !stderr_done) {
+			n := 0
+
+			if !stdout_done {
+				has_data, err = os.pipe_has_data(stdout_r)
+				if has_data {
+					n, err = os.read(stdout_r, buf[:])
+				}
+
+				switch err {
+				case nil:
+					_, err = append(&stdout_b, ..buf[:n])
+				case .EOF, .Broken_Pipe:
+					stdout_done = true
+					err = nil
+				}
+			}
+
+			if err == nil && !stderr_done {
+				n = 0
+				has_data, err = os.pipe_has_data(stderr_r)
+				if has_data {
+					n, err = os.read(stderr_r, buf[:])
+				}
+
+				switch err {
+				case nil:
+					_, err = append(&stderr_b, ..buf[:n])
+				case .EOF, .Broken_Pipe:
+					stderr_done = true
+					err = nil
+				}
+			}
+		}
+
+		stdout = stdout_b[:]
+		stderr = stderr_b[:]
+	}
+
+    state: os.Process_State
+	if err != nil {
+		state, _ = os.process_wait(process, timeout=0)
+		if !state.exited {
+			_ = os.process_kill(process)
+			state, _ = os.process_wait(process)
+		}
+		return
+	}
+
+	state, err = os.process_wait(process)
+	return
+}
+
+eval_builtin :: proc (state: ^State, command: Command, output, error: ^strings.Builder) -> bool {
+    command_name := command.arguments[0]
+    arguments    := command.arguments[1:]
     
     result := true
     if is_builtin(state, "exit", command_name) {
@@ -327,6 +438,20 @@ is_builtin :: proc (state: ^State, command, input: string) -> bool {
     result: bool
     if input == command {
         result = true
+    }
+    
+    return result
+}
+
+command_is_builtin :: proc (state: ^State, command: Command) -> bool {
+    name := command.arguments[0]
+    result: bool
+    
+    for builtin in state.builtins {
+        if builtin == name {
+            result = true
+            break
+        }
     }
     
     return result
@@ -462,9 +587,8 @@ parse_arguments :: proc (state: ^State, input: string, commands_buffer: ^[dynami
 }
 
 parse_command :: proc (parser: ^Parser) -> Command {
-    arguments := make([dynamic] string, parser.allocator)
-    
     command: Command
+    command.arguments = make([dynamic] string, parser.allocator)
     
     loop: for parser.input != "" {
         before := parser.input
@@ -478,10 +602,8 @@ parse_command :: proc (parser: ^Parser) -> Command {
             break loop
         }
         
-        append(&arguments, strings.clone(current, parser.allocator))
+        append(&command.arguments, strings.clone(current, parser.allocator))
     }
-    
-    command.arguments = arguments[:]
     
     return command
 }
@@ -603,6 +725,16 @@ find_in_path :: proc (target: string) -> (string, bool) {
     }
     
     return fullpath, ok
+}
+
+command_is_in_path :: proc (pipeline: Pipeline, command: Command) -> bool {
+    name := command.arguments[0]
+    
+    _, result := find_in_path(name)
+    if !result {
+        fmt.fprintf(pipeline.error, "%v: command not found\n", name)
+    }
+    return result
 }
 
 chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok {
