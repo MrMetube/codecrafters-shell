@@ -604,9 +604,11 @@ find_in_path :: proc (target: string) -> (string, bool) {
         dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
         if dir_error == nil {
             for info in dir_info {
-                if info.name == target {
-                    fullpath = info.fullpath
-                    ok = true
+                if (os.Permissions_Execute_All & info.mode != {}) {
+                    if info.name == target {
+                        fullpath = info.fullpath
+                        ok = true
+                    }
                 }
             }
         }
