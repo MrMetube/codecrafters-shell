@@ -146,6 +146,8 @@ main :: proc () {
             } else {
                 eval(&state, command, &output, &error, false)
             }
+            fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
+            fmt.fprintf(pipeline.error,  "%v", strings.to_string(error))
         } else if len(pipeline.commands) == 2 {
             first  := pipeline.commands[0]
             second := pipeline.commands[1]
@@ -165,15 +167,20 @@ main :: proc () {
                     second_in, first_out, pipe_error := os.pipe()
                     assert(pipe_error == nil)
                     
-                    start_command(&state,   first,           &error, first_out)
-                    execute_command(&state, second, &output, &error, second_in)
+                    second_process := start_command(&state, second, &error, { stdin = second_in, stdout = pipeline.output, stderr = pipeline.error })
+                    start_command(&state,  first, &error, { stdout = first_out })
+                    os.close(second_in)
+                    os.close(first_out)
+                    
+                    _, wait_error := os.process_wait(second_process)
+                    assert(wait_error == nil)
                 }
             }
+            
+            fmt.fprintf(pipeline.error,  "%v", strings.to_string(error))
         } else {
             unimplemented()
         }
-        fmt.fprintf(pipeline.output, "%v", strings.to_string(output))
-        fmt.fprintf(pipeline.error,  "%v", strings.to_string(error))
     }
 }
 
@@ -190,7 +197,7 @@ eval :: proc (state: ^State, command: Command, output, error: ^strings.Builder, 
     }
     
     if is_background {
-        process := start_command(state, command, error, bg_output, bg_error)
+        process := start_command(state, command, error, { stdout = bg_output, stderr = bg_error })
         
         index := -1
         for job, job_index in state.jobs {
@@ -221,22 +228,20 @@ eval :: proc (state: ^State, command: Command, output, error: ^strings.Builder, 
     }
 }
 
-start_command :: proc (state: ^State, command: Command, error: ^strings.Builder, out: ^os.File = nil, err: ^os.File = nil) -> os.Process {
-    command_name := command.arguments[0]
+start_command :: proc (state: ^State, command: Command, err_buffer: ^strings.Builder, params: os.Process_Desc = {}) -> os.Process {
+    params := params
+    params.command = command.arguments
+    params.working_dir = state.working_directory
     
-    process, start_error := os.process_start({
-        command     = command.arguments,
-        working_dir = state.working_directory,
-        stdout      = out,
-        stderr      = err,
-    })
-    
+    process, start_error := os.process_start(params)
     if start_error != nil {
-        fmt.sbprintf(error, "ERROR trying to start %v: %v\n", command_name, start_error)
+        command_name := command.arguments[0]
+        fmt.sbprintf(err_buffer, "ERROR trying to start %v: %v\n", command_name, start_error)
     }
     
     return process
 }
+
 execute_command :: proc (state: ^State, command: Command, output, error: ^strings.Builder, input: ^os.File = nil) {
     command_name := command.arguments[0]
     
@@ -248,13 +253,11 @@ execute_command :: proc (state: ^State, command: Command, output, error: ^string
     
     if exec_error != nil {
         fmt.sbprintf(error, "ERROR trying to exec %v: %v\n", command_name, exec_error)
+        return
     }
     
-    out_string := transmute(string) out_buffer
-    err_string := transmute(string) error_buffer
-    
-    fmt.sbprintf(output, "%v", out_string)
-    fmt.sbprintf(error,  "%v", err_string)
+    fmt.sbprintf(output, "%v", transmute(string) out_buffer)
+    fmt.sbprintf(error,  "%v", transmute(string) error_buffer)
 }
 
 eval_builtin :: proc (state: ^State, command_name: string, arguments: [] string, output, error: ^strings.Builder) -> bool {
@@ -425,7 +428,7 @@ parse_arguments :: proc (state: ^State, input: string, commands_buffer: ^[dynami
         
         ended: bool
         switch peeked {
-        // @todo(viktor): can only redirect or pipe, right?
+        // @todo(viktor): there could be multiple redirections but no more pipes or commands
         case "1>", ">":   parse_redirection(&parser, &parser.pipeline, .Create, .Out); ended = true
         case "2>":        parse_redirection(&parser, &parser.pipeline, .Create, .Err); ended = true
         case "1>>", ">>": parse_redirection(&parser, &parser.pipeline, .Append, .Out); ended = true
@@ -448,6 +451,7 @@ parse_arguments :: proc (state: ^State, input: string, commands_buffer: ^[dynami
         
         if ended {
             if parser.input != "" {
+                // @todo(viktor): fix this message, not always being after &
                 fmt.panicf("ERROR content after '&': `%v`\n", parser.input)
             }
             break loop
