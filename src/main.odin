@@ -92,8 +92,11 @@ main :: proc () {
     state: State
     state_init(&state)
     
+    cmd_buf := make([dynamic] Command, state.allocator)
+    
     for !state.exit {
         free_all(state.command_allocator)
+        clear(&cmd_buf)
         
         reap_jobs_and_print(&state, os.to_writer(os.stdout), show_running = false)
         
@@ -107,9 +110,7 @@ main :: proc () {
         
         input_text := transmute(string) buffer[:read_count]
         
-        // @leak
-        cmd_buf := make([dynamic] Command, state.command_allocator)
-        pipeline := parse_arguments(&state, input_text, &cmd_buf, state.command_allocator)
+        pipeline := parse_pipeline(&state, input_text, &cmd_buf, state.command_allocator)
         // assert that command's arguments are not empty
         
         output := os.to_writer(pipeline.output)
@@ -154,7 +155,7 @@ main :: proc () {
                     }
                     
                     if index < len(pipeline.commands)-1 {
-                        // @todo(viktor): just using the c2_out pipe-end causes an infinite stall/hang
+                        // @todo(viktor): just using the pipe.output causes an infinite stall/hang
                         this_output := strings.builder_make(state.command_allocator)
                         eval_builtin(&state, command, strings.to_writer(&this_output), error)
                         os.write_string(pipe.output, strings.to_string(this_output))
@@ -173,6 +174,8 @@ main :: proc () {
             }
         }
         
+        if pipeline.error  != os.stderr { os.close(pipeline.error) }
+        if pipeline.output != os.stdout { os.close(pipeline.output) }
     }
 }
 
@@ -183,8 +186,10 @@ eval_command :: proc (state: ^State, pipeline: Pipeline, command: ^Command, outp
     start_command(state, command, { stdout = pipeline.output, stderr = pipeline.error, stdin = input }, error)
     
     if !pipeline.background {
-        _, wait_error := os.process_wait(command.process)
-        assert(wait_error == nil)
+        if command.process != {} {
+            _, wait_error := os.process_wait(command.process)
+            assert(wait_error == nil)
+        }
     } else {
         // @leak pipeline's ^os.File handles
         
@@ -391,7 +396,7 @@ reap_jobs_and_print :: proc (state: ^State, output: io.Writer, show_running := f
 
 ////////////////////////////////////////////////
 
-parse_arguments :: proc (state: ^State, input: string, commands_buffer: ^[dynamic] Command, allocator: runtime.Allocator) -> Pipeline {
+parse_pipeline :: proc (state: ^State, input: string, commands_buffer: ^[dynamic] Command, allocator: runtime.Allocator) -> Pipeline {
     parser: Parser
     parser.state = state
     parser.input = input
@@ -404,39 +409,33 @@ parse_arguments :: proc (state: ^State, input: string, commands_buffer: ^[dynami
     
     loop: for parser.input != "" {
         command := parse_command(&parser)
+        append(parser.pipeline.commands, command)
         
         before := parser.input
         peeked := parse_string(&parser)
         
-        ended: bool
+        
         switch peeked {
-        // @todo(viktor): there could be multiple redirections but no more pipes or commands
-        case "1>", ">":   parse_redirection(&parser, &parser.pipeline, .Create, .Out); ended = true
-        case "2>":        parse_redirection(&parser, &parser.pipeline, .Create, .Err); ended = true
-        case "1>>", ">>": parse_redirection(&parser, &parser.pipeline, .Append, .Out); ended = true
-        case "2>>":       parse_redirection(&parser, &parser.pipeline, .Append, .Err); ended = true
+            // @todo(viktor): dont accept more pipes or args, just more redirections and a background
+        case "1>", ">":   parse_redirection(&parser, &parser.pipeline, .Create, .Out)
+        case "2>":        parse_redirection(&parser, &parser.pipeline, .Create, .Err)
+        case "1>>", ">>": parse_redirection(&parser, &parser.pipeline, .Append, .Out)
+        case "2>>":       parse_redirection(&parser, &parser.pipeline, .Append, .Err)
             
         case "|":
             // continue pipeline
             
         case "&":
             parser.pipeline.background = true
-            ended = true
+            if parser.input != "" {
+                fmt.panicf("ERROR content after '&': `%v`\n", parser.input)
+            }
+            break loop
             
         case: 
             // @note(viktor): reset what was peeked
             // @todo(viktor): is anything else even valid?
             parser.input = before
-        }
-        
-        append(parser.pipeline.commands, command)
-        
-        if ended {
-            if parser.input != "" {
-                // @todo(viktor): fix this message, not always being after &
-                fmt.panicf("ERROR content after '&': `%v`\n", parser.input)
-            }
-            break loop
         }
     }
     
@@ -468,6 +467,8 @@ parse_command :: proc (parser: ^Parser) -> Command {
 }
 
 command_is_builtin :: proc (state: ^State, command: Command) -> bool {
+    if len(command.arguments) == 0 do return false
+    
     name := command.arguments[0]
     result: bool
     
@@ -498,8 +499,8 @@ parse_redirection :: proc (parser: ^Parser, pipeline: ^Pipeline, kind: Redirecti
     assert(open_error == nil)
     
     switch target {
-        case .Out: pipeline.output   = handle
-        case .Err: pipeline.error = handle
+        case .Out: pipeline.output = handle
+        case .Err: pipeline.error  = handle
     }
 }
 
@@ -528,8 +529,9 @@ parse_string :: proc (parser: ^Parser) -> string {
     
     tasks := Normal
     
-    eaten: int
+    parser.input = strings.trim_left_space(parser.input)
     
+    eaten: int
     loop: for r in parser.input {
         eaten += 1
         
@@ -566,6 +568,7 @@ parse_string :: proc (parser: ^Parser) -> string {
     }
     
     parser.input = parser.input[eaten:]
+    parser.input = strings.trim_left_space(parser.input)
     
     result := strings.to_string(parser.buffer)
     
@@ -603,6 +606,8 @@ find_in_path :: proc (target: string) -> (string, bool) {
 }
 
 command_is_in_path :: proc (error: io.Writer, command: Command) -> bool {
+    if len(command.arguments) == 0 do return false
+    
     name := command.arguments[0]
     
     _, result := find_in_path(name)
