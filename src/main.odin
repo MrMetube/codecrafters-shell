@@ -21,6 +21,8 @@ Shell :: struct {
     builtins: [dynamic] string,
     
     jobs: [dynamic] Job,
+    
+    history: [dynamic] string,
 }
 
 Pipeline :: struct {
@@ -425,6 +427,8 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         fmt.wprintfln(output, "%v", shell.working_directory)
     } else if is_builtin(shell, "jobs", command_name) {
         reap_jobs_and_print(shell, output, show_running = true)
+    } else if is_builtin(shell, "history", command_name) {
+        fmt.wprintfln(output, "TODO")
     } else if is_builtin(shell, "type", command_name) {
         is_builtin := false
         
