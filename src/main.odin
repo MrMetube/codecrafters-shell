@@ -146,21 +146,31 @@ main :: proc () {
                     buffer[len(buffer)-1] = 0
                     resize(&buffer, len(buffer)-1)
                 }
+                
             case '\t':
-                commands := [] string { "echo", "exit" }
-                found: bool
-                match: for command in commands {
-                    if strings.starts_with(command, transmute(string) buffer[:]) {
-                        resize(&buffer, len(command))
-                        copy(buffer[:], transmute([] u8) command)
-                        append(&buffer, ' ')
-                        found = true
-                        break match
+                prefix := transmute(string) buffer[:]
+                builtins := [] string { "echo", "exit" }
+                found: string
+                builtin: for command in builtins {
+                    if strings.starts_with(command, prefix) {
+                        found = command
+                        break builtin
                     }
                 }
                 
-                if !found {
+                if found == "" {
+                    matched, ok := match_in_path(prefix)
+                    if ok {
+                        found = matched
+                    }
+                }
+                
+                if found == "" {
                     fmt.print('\a')
+                } else {
+                    resize(&buffer, len(found))
+                    copy(buffer[:], transmute([] u8) found)
+                    append(&buffer, ' ')
                 }
                 
             case '\n':
@@ -652,6 +662,7 @@ parse_string :: proc (parser: ^Parser) -> string {
 command_valid :: proc (error: io.Writer, command: Command) -> bool { return command.is_builtin || command_is_in_path(error, command) } 
 
 find_in_path :: proc (target: string) -> (string, bool) {
+    // @speed cache this
     path_variable := os.get_env("PATH", context.temp_allocator)
                 
     fullpath: string
@@ -675,6 +686,34 @@ find_in_path :: proc (target: string) -> (string, bool) {
     }
     
     return fullpath, ok
+}
+
+match_in_path :: proc (prefix: string) -> (string, bool) {
+    // @speed cache this
+    path_variable := os.get_env("PATH", context.temp_allocator)
+                
+    result: string
+    ok: bool
+    // @copypasta form find_in_path
+    for path_variable != "" {
+        path_separator :: ";" when ODIN_OS == .Windows else ":"
+        
+        dir_path := chop(&path_variable, path_separator)
+        
+        dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
+        if dir_error == nil {
+            for info in dir_info {
+                if (os.Permissions_Execute_All & info.mode != {}) {
+                    if strings.starts_with(info.name, prefix) {
+                        result = info.name
+                        ok = true
+                    }
+                }
+            }
+        }
+    }
+    
+    return result, ok
 }
 
 command_is_in_path :: proc (error: io.Writer, command: Command) -> bool {
