@@ -4,7 +4,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:io"
 import "core:os"
-import "core:sys/posix"
 import "core:strings"
 import "core:slice"
 
@@ -98,33 +97,9 @@ main :: proc () {
     
     cmd_buf := make([dynamic] Command, shell.allocator)
     
-    if !posix.isatty(posix.STDIN_FILENO) {
-        fmt.eprintln("stdin is not a terminal")
-        return
-    }
-    
-    original: posix.termios
-    if posix.tcgetattr(posix.STDIN_FILENO, &original) != .OK {
-        fmt.eprintln("tcgetattr failed")
-        return
-    }
-    
-    // Always restore the terminal, including on normal return.
-    defer {
-        posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &original)
-    }
-    
-    raw := original
-    raw.c_lflag -= {.ECHO, .ICANON}
-    
-    // Read one byte at a time.
-    raw.c_cc[auto_cast posix.VMIN]  = 1
-    raw.c_cc[auto_cast posix.VTIME] = 0
-    
-    if posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &raw) != .OK {
-        fmt.eprintln("tcsetattr failed")
-        return
-    }
+    terminal_data, terminal_ok := begin_terminal_mode()
+    assert(terminal_ok)
+    defer end_terminal_mode(terminal_data)
     
     for !shell.exit {
         free_all(shell.command_allocator)
