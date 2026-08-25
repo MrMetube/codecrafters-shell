@@ -365,6 +365,10 @@ main :: proc () {
         if pipeline.error  != os.stderr { os.close(pipeline.error)  }
         if pipeline.output != os.stdout { os.close(pipeline.output) }
     }
+    
+    if history_file, ok := os.lookup_env("HISTFILE", context.temp_allocator); ok {
+        write_history_to_file(&shell, history_file, append = false)
+    }
 }
 
 ////////////////////////////////////////////////
