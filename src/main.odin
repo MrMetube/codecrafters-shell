@@ -129,8 +129,7 @@ main :: proc () {
                 reset_matches = false
                 if len(matches) == 0 {
                     prefix := transmute(string) typed[:]
-                    builtins := [] string { "echo", "exit" }
-                    for command in builtins {
+                    for command in shell.builtins {
                         if strings.starts_with(command, prefix) {
                             append(&matches, command)
                         }
@@ -244,7 +243,9 @@ main :: proc () {
         input_text := transmute(string) typed[:]
         input_text = strings.trim_space(input_text)
         
-        append(&shell.history, strings.clone(input_text, shell.allocator))
+        if input_text != "" {
+            append(&shell.history, strings.clone(input_text, shell.allocator))
+        }
         pipeline := parse_pipeline(&shell, input_text, &cmd_buf, shell.command_allocator)
         // assert that command's arguments are not empty
         
@@ -430,9 +431,9 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
     } else if is_builtin(shell, "jobs", command_name) {
         reap_jobs_and_print(shell, output, show_running = true)
     } else if is_builtin(shell, "history", command_name) {
-        // #reverse for entry in history {
-        //     fmt.wprintfln(output, entry)
-        // }
+        for entry, index in shell.history {
+            fmt.wprintfln(output, "% 4d  %v", 1+index, entry)
+        }
     } else if is_builtin(shell, "type", command_name) {
         is_builtin := false
         
