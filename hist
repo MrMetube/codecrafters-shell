@@ -1,11 +1,9 @@
 echo a
 echo b
-pwd
-history
-history -a hist
-history -a hist
-pwd
-echo c
-echo d
+history -w hist
 echo a
+echo b
+history -w hist
+pwd
+home
 history -a hist

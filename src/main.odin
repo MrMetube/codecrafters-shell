@@ -91,6 +91,10 @@ shell_init :: proc (shell: ^Shell) {
     
     eval_builtin(shell, command, writer, writer)
     
+    if history_file, ok := os.lookup_env("HISTFILE", context.temp_allocator); ok {
+        read_history_from_file(shell, history_file)
+    }
+    
     shell.initialized = true
 }
 
@@ -377,8 +381,56 @@ copy_to_buffer_b :: proc (destination: ^[dynamic; $N] u8, source: [] u8) {
 }
 copy_to_buffer_s :: proc (destination: ^[dynamic; $N] u8, source: string) { copy_to_buffer(destination, transmute([] u8) source) }
 
+////////////////////////////////////////////////
+
 add_to_history :: proc (shell: ^Shell, command_text: string) {
     append(&shell.history, strings.clone(command_text, shell.allocator))
+}
+
+read_history_from_file :: proc (shell: ^Shell, file: string) {
+    data, read_error := os.read_entire_file(file, allocator = shell.command_allocator)
+    assert(read_error == nil)
+    
+    lines := transmute(string) data
+    last: string
+    for line in strings.split_lines_iterator(&lines) {
+        if last != "" {
+            add_to_history(shell, last)
+        }
+        last = line
+    }
+    
+    if last != "" {
+        add_to_history(shell, last)
+    }
+}
+
+write_history_to_file :: proc (shell: ^Shell, file: string, append: bool) {
+    lines := strings.builder_make(shell.command_allocator)
+    
+    begin := !append ? 0 : shell.history_append_from_index
+    if len(shell.history) > begin {
+        for entry in shell.history[begin:] {
+            fmt.sbprintln(&lines, entry)
+        }
+    }
+    
+    if append {
+        shell.history_append_from_index = len(shell.history)
+    }
+    
+    flags := os.File_Flags { .Write, .Create }
+    if !append {
+        flags += { .Trunc }
+    } else {
+        flags += { .Append }
+    }
+    
+    handle, open_error  := os.open(file, flags); assert(open_error  == nil)
+    defer { close_error := os.close(handle);     assert(close_error == nil) }
+    
+    os.seek(handle, 0, !append ? .Start : .End)
+    os.write_string(handle, strings.to_string(lines))
 }
 
 ////////////////////////////////////////////////
@@ -486,10 +538,9 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
     } else if is_builtin(shell, "jobs", command_name) {
         reap_jobs_and_print(shell, output, show_running = true)
     } else if is_builtin(shell, "history", command_name) {
-        print_history: bool = true
         invalid: bool
-        last_n: int
-        last_n_set: bool
+        last_n: Maybe(int)
+        print_history := true
         
         if len(arguments) != 0 {
             if len(arguments) != 1 && len(arguments) != 2 {
@@ -498,60 +549,13 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
             } else if len(arguments) == 2 {
                 subcommand := shift(&arguments)
                 
+                print_history = false
+                file := shift(&arguments)
                 switch subcommand {
-                case "-w":
-                    print_history = false
-                    file := shift(&arguments)
+                case "-w": write_history_to_file(shell, file, append = false)
+                case "-a": write_history_to_file(shell, file, append = true)
+                case "-r": read_history_from_file(shell, file)
                     
-                    lines := strings.builder_make(shell.command_allocator)
-                    
-                    for entry in shell.history {
-                        fmt.sbprintln(&lines, entry)
-                    }
-                    
-                    write_error := os.write_entire_file(file, strings.to_string(lines))
-                    assert(write_error == nil)
-                    
-                case "-a":
-                    print_history = false
-                    if len(shell.history) > shell.history_append_from_index {
-                        file := shift(&arguments)
-                        
-                        lines := strings.builder_make(shell.command_allocator)
-                        
-                        data, read_error := os.read_entire_file(file, shell.command_allocator)
-                        if read_error == nil {
-                            fmt.sbprint(&lines, transmute(string) data)
-                        }
-                        
-                        for entry in shell.history[shell.history_append_from_index:] {
-                            fmt.sbprintln(&lines, entry)
-                        }
-                        shell.history_append_from_index = len(shell.history)
-                        
-                        write_error := os.write_entire_file(file, strings.to_string(lines))
-                        assert(write_error == nil)
-                    }
-                    
-                case "-r":
-                    print_history = false
-                    file := shift(&arguments)
-                    
-                    data, read_error := os.read_entire_file(file, allocator = shell.command_allocator)
-                    assert(read_error == nil)
-                    
-                    lines := transmute(string) data
-                    last: string
-                    for line in strings.split_lines_iterator(&lines) {
-                        if last != "" {
-                            add_to_history(shell, last)
-                        }
-                        last = line
-                    }
-                    
-                    if last != "" {
-                        add_to_history(shell, last)
-                    }
                 case:
                     fmt.wprintfln(output, "history: invalid usage: unknown subcommand got %q", subcommand)
                     invalid = true
@@ -563,7 +567,6 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                     fmt.wprintfln(output, "history: invalid usage: expected first argument to be a number but got %q", last_n_string)
                     invalid = true
                 } else {
-                    last_n_set = true
                     last_n = clamp(last_n_parsed, 0, len(shell.history))
                 }
             }
@@ -571,17 +574,19 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         
         if !invalid {
             if print_history {
-                history := shell.history[:]
-                if last_n_set {
-                    history = shell.history[len(shell.history)-last_n:]
+                history: [] string
+                offset := 1
+                
+                if last_n, ok := last_n.?; ok {
+                    offset  = len(shell.history)-last_n
+                    history = shell.history[offset:]
+                } else {
+                    offset  = 1
+                    history = shell.history[0:]
                 }
                 
                 for entry, index in history {
-                    number := index+1
-                    if last_n_set {
-                        number = len(shell.history)-last_n+index
-                    }
-                    fmt.wprintfln(output, "% 4d  %v", number, entry)
+                    fmt.wprintfln(output, "% 4d  %v", offset + index, entry)
                 }
             }
         }
