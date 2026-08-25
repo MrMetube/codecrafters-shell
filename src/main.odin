@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 package main
 
 import "base:runtime"
@@ -242,7 +243,8 @@ main :: proc () {
         
         input_text := transmute(string) typed[:]
         input_text = strings.trim_space(input_text)
-                
+        
+        append(&shell.history, strings.clone(input_text, shell.allocator))
         pipeline := parse_pipeline(&shell, input_text, &cmd_buf, shell.command_allocator)
         // assert that command's arguments are not empty
         
@@ -428,7 +430,9 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
     } else if is_builtin(shell, "jobs", command_name) {
         reap_jobs_and_print(shell, output, show_running = true)
     } else if is_builtin(shell, "history", command_name) {
-        fmt.wprintfln(output, "TODO")
+        // #reverse for entry in history {
+        //     fmt.wprintfln(output, entry)
+        // }
     } else if is_builtin(shell, "type", command_name) {
         is_builtin := false
         
@@ -476,7 +480,7 @@ eval_path :: proc (shell: ^Shell, target: string) -> string {
     } else if !os.is_absolute_path(target) {
         result, _ = os.join_path({shell.working_directory, target}, shell.command_allocator)
     } else {
-        result = strings.clone(target)
+        result = strings.clone(target, shell.command_allocator)
     }
     
     return result
