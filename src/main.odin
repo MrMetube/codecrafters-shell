@@ -291,7 +291,7 @@ main :: proc () {
         if input_text != "" {
             shell.history_is_navigating     = false
             shell.history_navigation_offset = 0
-            append(&shell.history, strings.clone(input_text, shell.allocator))
+            add_to_history(&shell, input_text)
         }
         pipeline := parse_pipeline(&shell, input_text, &cmd_buf, shell.command_allocator)
         // assert that command's arguments are not empty
@@ -375,6 +375,12 @@ copy_to_buffer_b :: proc (destination: ^[dynamic; $N] u8, source: [] u8) {
     copy(destination[:], source)
 }
 copy_to_buffer_s :: proc (destination: ^[dynamic; $N] u8, source: string) { copy_to_buffer(destination, transmute([] u8) source) }
+
+add_to_history :: proc (shell: ^Shell, command_text: string) {
+    append(&shell.history, strings.clone(command_text, shell.allocator))
+}
+
+////////////////////////////////////////////////
 
 eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
     error := os.to_writer(pipeline.error)
@@ -479,14 +485,42 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
     } else if is_builtin(shell, "jobs", command_name) {
         reap_jobs_and_print(shell, output, show_running = true)
     } else if is_builtin(shell, "history", command_name) {
+        print_history: bool = true
         invalid: bool
         last_n: int
         last_n_set: bool
         if len(arguments) != 0 {
-            if len(arguments) != 1 {
-                fmt.wprintfln(output, "history: invalid usage: expected 1 argument but got %d", len(arguments))
+            if len(arguments) != 1 && len(arguments) != 2 {
+                fmt.wprintfln(output, "history: invalid usage: expected 1 or 2 arguments but got %d", len(arguments))
                 invalid = true
-            } else {
+            } else if len(arguments) == 2 {
+                subcommand := shift(&arguments)
+                switch subcommand {
+                case "-r":
+                    print_history = false
+                    file := shift(&arguments)
+                    // handle, open_error := os.open(file, os.O_APPEND); assert(open_error == nil)
+                    // defer { close_error := os.close(handle); assert(close_error == nil) }
+                    
+                    // os.write(handle,
+                    data, ok := os.read_entire_file(file, allocator = shell.command_allocator)
+                    lines := transmute(string) data
+                    last: string
+                    for line in strings.split_lines_iterator(&lines) {
+                        if last != "" {
+                            add_to_history(shell, last)
+                        }
+                        last = line
+                    }
+                    
+                    if last != "" {
+                        add_to_history(shell, last)
+                    }
+                case:
+                    fmt.wprintfln(output, "history: invalid usage: unknown subcommand got %q", subcommand)
+                    invalid = true
+                }
+            } else if len(arguments) == 1 {
                 last_n_string := shift(&arguments)
                 last_n_parsed, ok := strconv.parse_int(last_n_string)
                 if !ok {
@@ -500,17 +534,19 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         }
         
         if !invalid {
-            history := shell.history[:]
-            if last_n_set {
-                history = shell.history[len(shell.history)-last_n:]
-            }
-            
-            for entry, index in history {
-                number := index
+            if print_history {
+                history := shell.history[:]
                 if last_n_set {
-                    number = len(shell.history)-last_n+index
+                    history = shell.history[len(shell.history)-last_n:]
                 }
-                fmt.wprintfln(output, "% 4d  %v", number, entry)
+                
+                for entry, index in history {
+                    number := index+1
+                    if last_n_set {
+                        number = len(shell.history)-last_n+index
+                    }
+                    fmt.wprintfln(output, "% 4d  %v", number, entry)
+                }
             }
         }
     } else if is_builtin(shell, "type", command_name) {
