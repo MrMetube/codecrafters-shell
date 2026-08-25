@@ -10,7 +10,7 @@ import "core:slice"
 
 Allocator :: runtime.Allocator
 
-State :: struct {
+Shell :: struct {
     initialized: bool,
     
     working_directory: string,
@@ -54,7 +54,7 @@ Job_State :: enum {
 }
 
 Parser :: struct {
-    state: ^State,
+    shell: ^Shell,
     allocator: Allocator,
     
     buffer: strings.Builder,
@@ -65,16 +65,16 @@ Parser :: struct {
 
 Redirection_Kind :: enum { Create, Append }
 
-state_init :: proc (state: ^State) {
-    state.command_allocator = context.temp_allocator
-    state.allocator         = context.allocator
+shell_init :: proc (shell: ^Shell) {
+    shell.command_allocator = context.temp_allocator
+    shell.allocator         = context.allocator
     
-    state.working_directory, _ = os.get_working_directory(state.allocator)
+    shell.working_directory, _ = os.get_working_directory(shell.allocator)
     
-    state.builtins = make([dynamic] string, state.allocator)
-    state.jobs     = make([dynamic] Job, state.allocator)
+    shell.builtins = make([dynamic] string, shell.allocator)
+    shell.jobs     = make([dynamic] Job, shell.allocator)
     
-    clear(&state.builtins)
+    clear(&shell.builtins)
     
     dummy  := strings.builder_make(context.temp_allocator)
     writer := strings.to_writer(&dummy)
@@ -83,9 +83,9 @@ state_init :: proc (state: ^State) {
     command.arguments = make([dynamic] string, context.temp_allocator)
     append(&command.arguments, "")
     
-    eval_builtin(state, command, writer, writer)
+    eval_builtin(shell, command, writer, writer)
     
-    state.initialized = true
+    shell.initialized = true
 }
 
 main :: proc () {
@@ -93,10 +93,10 @@ main :: proc () {
     reader,  ok := io.to_read_write_closer(standart_in)
     assert(ok)
     
-    state: State
-    state_init(&state)
+    shell: Shell
+    shell_init(&shell)
     
-    cmd_buf := make([dynamic] Command, state.allocator)
+    cmd_buf := make([dynamic] Command, shell.allocator)
     
     if !posix.isatty(posix.STDIN_FILENO) {
         fmt.eprintln("stdin is not a terminal")
@@ -126,11 +126,11 @@ main :: proc () {
         return
     }
     
-    for !state.exit {
-        free_all(state.command_allocator)
+    for !shell.exit {
+        free_all(shell.command_allocator)
         clear(&cmd_buf)
         
-        reap_jobs_and_print(&state, os.to_writer(os.stdout), show_running = false)
+        reap_jobs_and_print(&shell, os.to_writer(os.stdout), show_running = false)
         
         redraw_prompt("")
         
@@ -158,7 +158,41 @@ main :: proc () {
                         }
                     }
                     
-                    matches_in_path(&matches, prefix, state.command_allocator)
+                    matches_in_path :: proc (matches: ^[dynamic; $N] string, prefix: string, allocator: Allocator) {
+                        // @speed cache this
+                        path_variable := os.get_env("PATH", allocator)
+                        
+                        // @copypasta form find_in_path
+                        match: for path_variable != "" {
+                            path_separator :: ";" when ODIN_OS == .Windows else ":"
+                            
+                            dir_path := chop(&path_variable, path_separator)
+                            
+                            dir_info, dir_error := os.read_all_directory_by_path(dir_path, allocator)
+                            if dir_error == nil {
+                                for info in dir_info {
+                                    if (os.Permissions_Execute_All & info.mode != {}) {
+                                        if strings.starts_with(info.name, prefix) {
+                                            // @hack to skip cases where the system echo and the builtin echo are added to matches.
+                                            present: bool
+                                            for match in matches {
+                                                if match == info.name {
+                                                    present = true
+                                                    break
+                                                }
+                                            }
+                                            
+                                            if !present {
+                                                append(matches, info.name)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    matches_in_path(&matches, prefix, shell.command_allocator)
                     slice.sort(matches[:])
                     
                     switch len(matches) {
@@ -166,8 +200,7 @@ main :: proc () {
                         fmt.print('\a')
                         
                     case 1:
-                        found := matches[0]
-                        copy_to_buffer(&typed, transmute([] u8) found)
+                        copy_to_buffer(&typed, transmute([] u8) matches[0])
                         append(&typed, ' ')
                         reset_matches = true
                         
@@ -233,7 +266,7 @@ main :: proc () {
         input_text := transmute(string) typed[:]
         input_text = strings.trim_space(input_text)
                 
-        pipeline := parse_pipeline(&state, input_text, &cmd_buf, state.command_allocator)
+        pipeline := parse_pipeline(&shell, input_text, &cmd_buf, shell.command_allocator)
         // assert that command's arguments are not empty
         
         output := os.to_writer(pipeline.output)
@@ -252,7 +285,7 @@ main :: proc () {
                 output: ^os.File,
             }
             
-            pipes := make([] Pipe, len(pipeline.commands), state.command_allocator)
+            pipes := make([] Pipe, len(pipeline.commands), shell.command_allocator)
             
             for index in 0..<len(pipeline.commands)-1 {
                 r, w, pipe_error  := os.pipe()
@@ -267,29 +300,29 @@ main :: proc () {
                 if command.is_builtin {
                     if index > 0 {
                         prev    := pipeline.commands[index-1]
-                        prev_output := strings.builder_make(state.command_allocator)
+                        prev_output := strings.builder_make(shell.command_allocator)
                         pipe_read_all(&prev_output, pipe.input)
                         
                         if !prev.is_builtin {
                             _, _ = os.process_wait(prev.process)
                         }
                         
-                        append(&command.arguments, strings.clone(strings.to_string(prev_output), state.command_allocator))
+                        append(&command.arguments, strings.clone(strings.to_string(prev_output), shell.command_allocator))
                     }
                     
                     if index < len(pipeline.commands)-1 {
                         // @todo(viktor): just using the pipe.output causes an infinite stall/hang
-                        this_output := strings.builder_make(state.command_allocator)
-                        eval_builtin(&state, command, strings.to_writer(&this_output), error)
+                        this_output := strings.builder_make(shell.command_allocator)
+                        eval_builtin(&shell, command, strings.to_writer(&this_output), error)
                         os.write_string(pipe.output, strings.to_string(this_output))
                     } else {
-                        eval_builtin(&state, command, output, error)
+                        eval_builtin(&shell, command, output, error)
                     }
                 } else {
                     if index < len(pipes)-1 {
-                        start_command(&state, &command, { stdout = pipe.output, stdin = pipe.input }, error)
+                        start_command(&shell, &command, { stdout = pipe.output, stdin = pipe.input }, error)
                     } else {
-                        eval_command(&state, pipeline, &command, output, pipe.input)
+                        eval_command(&shell, pipeline, &command, output, pipe.input)
                     }
                 }
                 
@@ -297,10 +330,12 @@ main :: proc () {
             }
         }
         
-        if pipeline.error  != os.stderr { os.close(pipeline.error) }
+        if pipeline.error  != os.stderr { os.close(pipeline.error)  }
         if pipeline.output != os.stdout { os.close(pipeline.output) }
     }
 }
+
+////////////////////////////////////////////////
 
 redraw_prompt :: proc { redraw_prompt_b, redraw_prompt_s }
 redraw_prompt_b :: proc (buffer: ^[dynamic; $N] u8) { redraw_prompt(transmute(string) buffer[:]) }
@@ -313,11 +348,11 @@ copy_to_buffer :: proc (destination: ^[dynamic; $N] u8, source: [] u8) {
     copy(destination[:], source)
 }
 
-eval_command :: proc (state: ^State, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
+eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
     error := os.to_writer(pipeline.error)
     if !command_is_in_path(error, command^) { return }
     
-    start_command(state, command, { stdout = pipeline.output, stderr = pipeline.error, stdin = input }, error)
+    start_command(shell, command, { stdout = pipeline.output, stderr = pipeline.error, stdin = input }, error)
     
     if !pipeline.background {
         if command.process != {} {
@@ -328,25 +363,25 @@ eval_command :: proc (state: ^State, pipeline: Pipeline, command: ^Command, outp
         // @leak pipeline's ^os.File handles
         
         index := -1
-        for job, job_index in state.jobs {
+        for job, job_index in shell.jobs {
             if job.state == .Unused {
                 index = job_index
-                delete(job.command_line, state.allocator)
+                delete(job.command_line, shell.allocator)
                 break
             }
         }
         
         if index == -1 {
-            index = len(state.jobs)
-            append_nothing(&state.jobs)
+            index = len(shell.jobs)
+            append_nothing(&shell.jobs)
         }
         
-        job := &state.jobs[index]
+        job := &shell.jobs[index]
         job^ = {
             state = .Running,
             process = command.process,
             // @todo(viktor): quote args with a space
-            command_line = strings.join(command.arguments[:], " ", state.allocator),
+            command_line = strings.join(command.arguments[:], " ", shell.allocator),
         }
         
         id := index + 1
@@ -354,10 +389,10 @@ eval_command :: proc (state: ^State, pipeline: Pipeline, command: ^Command, outp
     }
 }
 
-start_command :: proc (state: ^State, command: ^Command, params: os.Process_Desc = {}, error: io.Writer) {
+start_command :: proc (shell: ^Shell, command: ^Command, params: os.Process_Desc = {}, error: io.Writer) {
     params := params
     params.command = command.arguments[:]
-    params.working_dir = state.working_directory
+    params.working_dir = shell.working_directory
     
     process, start_error := os.process_start(params)
     if start_error != nil {
@@ -369,16 +404,16 @@ start_command :: proc (state: ^State, command: ^Command, params: os.Process_Desc
 }
 
 pipe_read_all :: proc (buffer: ^strings.Builder, read_end: ^os.File) {
-    buf: [4096] u8 = ---
+    backing: [4096] u8 = ---
     read_loop: for {
         has_data, err := os.pipe_has_data(read_end)
-        n: int
+        read_bytes: int
         if has_data {
-            n, err = os.read(read_end, buf[:])
+            read_bytes, err = os.read(read_end, backing[:])
         }
         
         switch err {
-        case nil: append(&buffer.buf, ..buf[:n])
+        case nil: append(&buffer.buf, ..backing[:read_bytes])
         case .EOF, .Broken_Pipe:
             break read_loop
         case: unimplemented()
@@ -386,40 +421,40 @@ pipe_read_all :: proc (buffer: ^strings.Builder, read_end: ^os.File) {
     }
 }
 
-eval_builtin :: proc (state: ^State, command: Command, output, error: io.Writer) {
+eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer) {
     command_name := command.arguments[0]
     arguments    := command.arguments[1:]
     
-    if is_builtin(state, "exit", command_name) {
-        state.exit = true
-    } else if is_builtin(state, "echo", command_name) {
+    if is_builtin(shell, "exit", command_name) {
+        shell.exit = true
+    } else if is_builtin(shell, "echo", command_name) {
         for arg, index in arguments {
             if index != 0 do fmt.wprintf(output, " ")
             fmt.wprintf(output, "%v", arg)
         }
         fmt.wprintf(output, "\n")
-    } else if is_builtin(state, "cd", command_name) {
+    } else if is_builtin(shell, "cd", command_name) {
         target := shift(&arguments)
         
-        target = eval_path(state, target)
+        target = eval_path(shell, target)
         
         if os.is_directory(target) {
-            next, _ := os.clean_path(target, state.allocator)
+            next, _ := os.clean_path(target, shell.allocator)
             
-            delete_string(state.working_directory, state.allocator)
-            state.working_directory = next
+            delete_string(shell.working_directory, shell.allocator)
+            shell.working_directory = next
         } else {
             fmt.wprintfln(output, "cd: %v: No such file or directory", target)
         }
-    } else if is_builtin(state, "pwd", command_name) {
-        fmt.wprintfln(output, "%v", state.working_directory)
-    } else if is_builtin(state, "jobs", command_name) {
-        reap_jobs_and_print(state, output, show_running = true)
-    } else if is_builtin(state, "type", command_name) {
+    } else if is_builtin(shell, "pwd", command_name) {
+        fmt.wprintfln(output, "%v", shell.working_directory)
+    } else if is_builtin(shell, "jobs", command_name) {
+        reap_jobs_and_print(shell, output, show_running = true)
+    } else if is_builtin(shell, "type", command_name) {
         is_builtin := false
         
         exe_name := shift(&arguments)
-        for it in state.builtins {
+        for it in shell.builtins {
             if it == exe_name {
                 is_builtin = true
                 break
@@ -439,9 +474,9 @@ eval_builtin :: proc (state: ^State, command: Command, output, error: io.Writer)
     }
 }
 
-is_builtin :: proc (state: ^State, command, input: string) -> bool {
-    if !state.initialized {
-        append(&state.builtins, command)
+is_builtin :: proc (shell: ^Shell, command, input: string) -> bool {
+    if !shell.initialized {
+        append(&shell.builtins, command)
         return false
     }
     
@@ -455,12 +490,12 @@ is_builtin :: proc (state: ^State, command, input: string) -> bool {
 
 ////////////////////////////////////////////////
 
-eval_path :: proc (state: ^State, target: string) -> string {
+eval_path :: proc (shell: ^Shell, target: string) -> string {
     result: string
     if target == "~" {
-        result, _ = os.user_home_dir(state.command_allocator)
+        result, _ = os.user_home_dir(shell.command_allocator)
     } else if !os.is_absolute_path(target) {
-        result, _ = os.join_path({state.working_directory, target}, state.command_allocator)
+        result, _ = os.join_path({shell.working_directory, target}, shell.command_allocator)
     } else {
         result = strings.clone(target)
     }
@@ -470,9 +505,9 @@ eval_path :: proc (state: ^State, target: string) -> string {
 
 ////////////////////////////////////////////////
 
-reap_jobs_and_print :: proc (state: ^State, output: io.Writer, show_running := false) {
+reap_jobs_and_print :: proc (shell: ^Shell, output: io.Writer, show_running := false) {
     high_job_ids: [2] int
-    for &job, index in state.jobs {
+    for &job, index in shell.jobs {
         if job.state == .Unused do continue
         
         process_state, wait_error := os.process_wait(job.process, timeout = 0)
@@ -507,7 +542,7 @@ reap_jobs_and_print :: proc (state: ^State, output: io.Writer, show_running := f
         }
     }
     
-    for &job, index in state.jobs {
+    for &job, index in shell.jobs {
         if job.state == .Unused do continue
         
         id := index + 1
@@ -530,16 +565,20 @@ reap_jobs_and_print :: proc (state: ^State, output: io.Writer, show_running := f
 
 ////////////////////////////////////////////////
 
-parse_pipeline :: proc (state: ^State, input: string, commands_buffer: ^[dynamic] Command, allocator: Allocator) -> Pipeline {
-    parser: Parser
-    parser.state = state
-    parser.input = input
-    parser.allocator = allocator
-    parser.buffer = strings.builder_make(parser.allocator)
-    
-    parser.pipeline.commands = commands_buffer
-    parser.pipeline.output   = os.stdout
-    parser.pipeline.error    = os.stderr
+parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic] Command, allocator: Allocator) -> Pipeline {
+    parser := Parser {
+        shell = shell,
+        input = input,
+        
+        allocator = allocator,
+        buffer    = strings.builder_make(allocator),
+        
+        pipeline = {
+            commands = commands_buffer,
+            output   = os.stdout,
+            error    = os.stderr,
+        },
+    }
     
     loop: for parser.input != "" {
         command := parse_command(&parser)
@@ -595,12 +634,12 @@ parse_command :: proc (parser: ^Parser) -> Command {
         append(&command.arguments, strings.clone(current, parser.allocator))
     }
     
-    command.is_builtin = command_is_builtin(parser.state, command)
+    command.is_builtin = command_is_builtin(parser.shell, command)
     
     return command
 }
 
-command_is_builtin :: proc (state: ^State, command: Command) -> bool {
+command_is_builtin :: proc (state: ^Shell, command: Command) -> bool {
     if len(command.arguments) == 0 do return false
     
     name := command.arguments[0]
@@ -620,7 +659,7 @@ parse_redirection :: proc (parser: ^Parser, pipeline: ^Pipeline, kind: Redirecti
     arg := parse_string(parser)
     // @todo(viktor): handle empty result
     
-    path := eval_path(parser.state, arg)
+    path := eval_path(parser.shell, arg)
     
     flags := os.File_Flags{ .Read, .Write, .Create }
     switch kind {
@@ -738,40 +777,6 @@ find_in_path :: proc (target: string) -> (string, bool) {
     }
     
     return fullpath, ok
-}
-
-matches_in_path :: proc (matches: ^[dynamic; $N] string, prefix: string, allocator: Allocator) {
-    // @speed cache this
-    path_variable := os.get_env("PATH", allocator)
-    
-    // @copypasta form find_in_path
-    match: for path_variable != "" {
-        path_separator :: ";" when ODIN_OS == .Windows else ":"
-        
-        dir_path := chop(&path_variable, path_separator)
-        
-        dir_info, dir_error := os.read_all_directory_by_path(dir_path, allocator)
-        if dir_error == nil {
-            for info in dir_info {
-                if (os.Permissions_Execute_All & info.mode != {}) {
-                    if strings.starts_with(info.name, prefix) {
-                        // @hack to skip cases where the system echo and the builtin echo are added to matches.
-                        present: bool
-                        for match in matches {
-                            if match == info.name {
-                                present = true
-                                break
-                            }
-                        }
-                        
-                        if !present {
-                            append(matches, info.name)
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 command_is_in_path :: proc (error: io.Writer, command: Command) -> bool {
