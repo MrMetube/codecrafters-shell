@@ -148,15 +148,20 @@ main :: proc () {
                 }
             case '\t':
                 commands := [] string { "echo", "exit" }
+                found: bool
                 match: for command in commands {
                     if strings.starts_with(command, transmute(string) buffer[:]) {
                         resize(&buffer, len(command))
                         copy(buffer[:], transmute([] u8) command)
                         append(&buffer, ' ')
+                        found = true
                         break match
                     }
                 }
-                // @todo handle no match
+                
+                if !found {
+                    fmt.print('\a')
+                }
                 
             case '\n':
                 append(&buffer, typed)
