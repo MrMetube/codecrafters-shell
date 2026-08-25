@@ -159,18 +159,47 @@ main :: proc () {
                     }
                     
                     matches_in_path(&matches, prefix, state.command_allocator)
+                    slice.sort(matches[:])
                     
-                    if len(matches) != 1 {
+                    switch len(matches) {
+                    case 0:
                         fmt.print('\a')
-                    } else {
+                        
+                    case 1:
                         found := matches[0]
                         copy_to_buffer(&typed, transmute([] u8) found)
                         append(&typed, ' ')
                         reset_matches = true
+                        
+                    case:
+                        longer_prefix_found: bool
+                        longer_prefix: string
+                        first := matches[0]
+                        // @speed
+                        for i in 0..<len(first)-len(prefix) {
+                            // lexical sorting ensures that the shortes common-prefix would appear before longer matches with that prefix
+                            longer_prefix = first[:len(first)-i]
+                            longer_prefix_found = true
+                            for other in matches[1:] {
+                                if !strings.starts_with(other, longer_prefix) {
+                                    longer_prefix_found = false
+                                    break
+                                }
+                            }
+                            
+                            if longer_prefix_found {
+                                break
+                            }
+                        }
+                        
+                        if !longer_prefix_found {   
+                            fmt.print('\a')
+                        } else if longer_prefix != prefix {
+                            copy_to_buffer(&typed, transmute([] u8) longer_prefix)
+                            reset_matches = true
+                        }
                     }
                 } else {
-                    slice.sort(matches[:])
-                    
                     fmt.printf("\n")
                     for match, index in matches {
                         if index > 0 { fmt.printf("  ") }
@@ -202,7 +231,8 @@ main :: proc () {
         redraw_prompt(&typed)
         
         input_text := transmute(string) typed[:]
-        
+        input_text = strings.trim_space(input_text)
+                
         pipeline := parse_pipeline(&state, input_text, &cmd_buf, state.command_allocator)
         // assert that command's arguments are not empty
         
