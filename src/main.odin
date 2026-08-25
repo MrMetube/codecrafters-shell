@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:io"
 import "core:os"
+import "core:sys/posix"
 import "core:strings"
 
 State :: struct {
@@ -94,21 +95,81 @@ main :: proc () {
     
     cmd_buf := make([dynamic] Command, state.allocator)
     
+    if !posix.isatty(posix.STDIN_FILENO) {
+        fmt.eprintln("stdin is not a terminal")
+        return
+    }
+    
+    original: posix.termios
+    if posix.tcgetattr(posix.STDIN_FILENO, &original) != .OK {
+        fmt.eprintln("tcgetattr failed")
+        return
+    }
+    
+    // Always restore the terminal, including on normal return.
+    defer {
+        posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &original)
+    }
+    
+    raw := original
+    raw.c_lflag -= {.ECHO, .ICANON}
+    
+    // Read one byte at a time.
+    raw.c_cc[auto_cast posix.VMIN]  = 1
+    raw.c_cc[auto_cast posix.VTIME] = 0
+    
+    if posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &raw) != .OK {
+        fmt.eprintln("tcsetattr failed")
+        return
+    }
+    
     for !state.exit {
         free_all(state.command_allocator)
         clear(&cmd_buf)
         
         reap_jobs_and_print(&state, os.to_writer(os.stdout), show_running = false)
         
-        fmt.printf("$ ")
+        redraw_prompt("")
         
-        buffer: [4096] u8
-        read_count, read_error := io.read(reader, buffer[:])
-        if read_error != nil {
-            fmt.panicf("ERROR: failed to read : %v\n", read_error)
+        buffer: [dynamic; 4096] u8
+        input: for {
+            read_buffer: [1] u8
+            read_count, read_error := io.read(reader, read_buffer[:])
+            if read_error != nil {
+                fmt.panicf("ERROR: failed to read : %v\n", read_error)
+            }
+            
+            typed := read_buffer[0]
+            switch typed {
+            case '\b', 0x7F:
+                if len(buffer) > 0 {
+                    buffer[len(buffer)-1] = 0
+                    resize(&buffer, len(buffer)-1)
+                }
+            case '\t':
+                commands := [] string { "echo", "exit" }
+                match: for command in commands {
+                    if strings.starts_with(command, transmute(string) buffer[:]) {
+                        resize(&buffer, len(command))
+                        copy(buffer[:], transmute([] u8) command)
+                        append(&buffer, ' ')
+                        break match
+                    }
+                }
+                // @todo handle no match
+                
+            case '\n':
+                append(&buffer, typed)
+                break input
+                
+            case: 
+                append(&buffer, typed)
+            }
+            redraw_prompt(buffer[:])
         }
+        redraw_prompt(buffer[:])
         
-        input_text := transmute(string) buffer[:read_count]
+        input_text := transmute(string) buffer[:]
         
         pipeline := parse_pipeline(&state, input_text, &cmd_buf, state.command_allocator)
         // assert that command's arguments are not empty
@@ -177,6 +238,12 @@ main :: proc () {
         if pipeline.error  != os.stderr { os.close(pipeline.error) }
         if pipeline.output != os.stdout { os.close(pipeline.output) }
     }
+}
+
+redraw_prompt :: proc { redraw_prompt_b, redraw_prompt_s }
+redraw_prompt_b :: proc (buffer: [] u8) { redraw_prompt(transmute(string) buffer) }
+redraw_prompt_s :: proc (line: string) {
+    fmt.printf("\r\x1b[2K$ %s", line)
 }
 
 eval_command :: proc (state: ^State, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
