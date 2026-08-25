@@ -7,6 +7,7 @@ import "core:io"
 import "core:os"
 import "core:strings"
 import "core:slice"
+import "core:strconv"
 
 Allocator :: runtime.Allocator
 
@@ -431,8 +432,39 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
     } else if is_builtin(shell, "jobs", command_name) {
         reap_jobs_and_print(shell, output, show_running = true)
     } else if is_builtin(shell, "history", command_name) {
-        for entry, index in shell.history {
-            fmt.wprintfln(output, "% 4d  %v", 1+index, entry)
+        invalid: bool
+        last_n: int
+        last_n_set: bool
+        if len(arguments) != 0 {
+            if len(arguments) != 1 {
+                fmt.wprintfln(output, "history: invalid usage: expected 1 argument but got %d", len(arguments))
+                invalid = true
+            } else {
+                last_n_string := shift(&arguments)
+                last_n_parsed, ok := strconv.parse_int(last_n_string)
+                if !ok {
+                    fmt.wprintfln(output, "history: invalid usage: expected first argument to be a number but got %q", last_n_string)
+                    invalid = true
+                } else {
+                    last_n_set = true
+                    last_n = clamp(last_n_parsed, 0, len(shell.history))
+                }
+            }
+        }
+        
+        if !invalid {
+            history := shell.history[:]
+            if last_n_set {
+                history = shell.history[len(shell.history)-last_n:]
+            }
+            
+            for entry, index in history {
+                number := index
+                if last_n_set {
+                    number = len(shell.history)-last_n+index
+                }
+                fmt.wprintfln(output, "% 4d  %v", number, entry)
+            }
         }
     } else if is_builtin(shell, "type", command_name) {
         is_builtin := false
