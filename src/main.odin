@@ -489,6 +489,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         invalid: bool
         last_n: int
         last_n_set: bool
+        
         if len(arguments) != 0 {
             if len(arguments) != 1 && len(arguments) != 2 {
                 fmt.wprintfln(output, "history: invalid usage: expected 1 or 2 arguments but got %d", len(arguments))
@@ -496,13 +497,22 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
             } else if len(arguments) == 2 {
                 subcommand := shift(&arguments)
                 switch subcommand {
+                case "-w":
+                    print_history = false
+                    file := shift(&arguments)
+                    handle, open_error := os.open(file, os.O_WRONLY | os.O_CREATE); assert(open_error == nil)
+                    defer { close_error := os.close(handle); assert(close_error == nil) }
+                    
+                    lines := strings.builder_make(shell.command_allocator)
+                    for entry in shell.history {
+                        fmt.sbprintf(&lines, "%v\n", entry)
+                    }
+                    written, write_error := os.write(handle, lines.buf[:]); assert(write_error == nil)
+                    assert(written == len(lines.buf))
+                    
                 case "-r":
                     print_history = false
                     file := shift(&arguments)
-                    // handle, open_error := os.open(file, os.O_APPEND); assert(open_error == nil)
-                    // defer { close_error := os.close(handle); assert(close_error == nil) }
-                    
-                    // os.write(handle,
                     data, ok := os.read_entire_file(file, allocator = shell.command_allocator)
                     lines := transmute(string) data
                     last: string
