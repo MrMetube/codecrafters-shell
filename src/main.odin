@@ -6,6 +6,9 @@ import "core:io"
 import "core:os"
 import "core:sys/posix"
 import "core:strings"
+import "core:slice"
+
+Allocator :: runtime.Allocator
 
 State :: struct {
     initialized: bool,
@@ -13,8 +16,8 @@ State :: struct {
     working_directory: string,
     exit: bool,
     
-    allocator:         runtime.Allocator,
-    command_allocator: runtime.Allocator,
+    allocator:         Allocator,
+    command_allocator: Allocator,
     
     builtins: [dynamic] string,
     
@@ -52,7 +55,7 @@ Job_State :: enum {
 
 Parser :: struct {
     state: ^State,
-    allocator: runtime.Allocator,
+    allocator: Allocator,
     
     buffer: strings.Builder,
     input: string,
@@ -131,7 +134,9 @@ main :: proc () {
         
         redraw_prompt("")
         
-        buffer: [dynamic; 4096] u8
+        typed:   [dynamic; 4096] u8
+        matches: [dynamic; 2048] string
+        
         input: for {
             read_buffer: [1] u8
             read_count, read_error := io.read(reader, read_buffer[:])
@@ -139,52 +144,64 @@ main :: proc () {
                 fmt.panicf("ERROR: failed to read : %v\n", read_error)
             }
             
-            typed := read_buffer[0]
-            switch typed {
-            case '\b', 0x7F:
-                if len(buffer) > 0 {
-                    buffer[len(buffer)-1] = 0
-                    resize(&buffer, len(buffer)-1)
-                }
-                
+            typed_character := read_buffer[0]
+            reset_matches := true
+            switch typed_character {
             case '\t':
-                prefix := transmute(string) buffer[:]
-                builtins := [] string { "echo", "exit" }
-                found: string
-                builtin: for command in builtins {
-                    if strings.starts_with(command, prefix) {
-                        found = command
-                        break builtin
+                reset_matches = false
+                if len(matches) == 0 {
+                    prefix := transmute(string) typed[:]
+                    builtins := [] string { "echo", "exit" }
+                    for command in builtins {
+                        if strings.starts_with(command, prefix) {
+                            append(&matches, command)
+                        }
                     }
-                }
-                
-                if found == "" {
-                    matched, ok := match_in_path(prefix)
-                    if ok {
-                        found = matched
+                    
+                    matches_in_path(&matches, prefix, state.command_allocator)
+                    
+                    if len(matches) != 1 {
+                        fmt.print('\a')
+                    } else {
+                        found := matches[0]
+                        copy_to_buffer(&typed, transmute([] u8) found)
+                        append(&typed, ' ')
+                        reset_matches = true
                     }
-                }
-                
-                if found == "" {
-                    fmt.print('\a')
                 } else {
-                    resize(&buffer, len(found))
-                    copy(buffer[:], transmute([] u8) found)
-                    append(&buffer, ' ')
+                    slice.sort(matches[:])
+                    
+                    fmt.printf("\n")
+                    for match, index in matches {
+                        if index > 0 { fmt.printf("  ") }
+                        fmt.printf("%v", match)
+                    }
+                    fmt.printf("\n")
                 }
                 
+            case '\b', 0x7F:
+                if len(typed) > 0 {
+                    typed[len(typed)-1] = 0
+                    resize(&typed, len(typed)-1)
+                }
+                   
             case '\n':
-                append(&buffer, typed)
+                append(&typed, typed_character)
                 break input
                 
-            case: 
-                append(&buffer, typed)
+            case:
+                append(&typed, typed_character)
             }
-            redraw_prompt(buffer[:])
+            
+            if reset_matches {
+                clear(&matches)
+            }
+            
+            redraw_prompt(&typed)
         }
-        redraw_prompt(buffer[:])
+        redraw_prompt(&typed)
         
-        input_text := transmute(string) buffer[:]
+        input_text := transmute(string) typed[:]
         
         pipeline := parse_pipeline(&state, input_text, &cmd_buf, state.command_allocator)
         // assert that command's arguments are not empty
@@ -256,9 +273,14 @@ main :: proc () {
 }
 
 redraw_prompt :: proc { redraw_prompt_b, redraw_prompt_s }
-redraw_prompt_b :: proc (buffer: [] u8) { redraw_prompt(transmute(string) buffer) }
+redraw_prompt_b :: proc (buffer: ^[dynamic; $N] u8) { redraw_prompt(transmute(string) buffer[:]) }
 redraw_prompt_s :: proc (line: string) {
     fmt.printf("\r\x1b[2K$ %s", line)
+}
+
+copy_to_buffer :: proc (destination: ^[dynamic; $N] u8, source: [] u8) {
+    resize(destination, len(source))
+    copy(destination[:], source)
 }
 
 eval_command :: proc (state: ^State, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
@@ -478,7 +500,7 @@ reap_jobs_and_print :: proc (state: ^State, output: io.Writer, show_running := f
 
 ////////////////////////////////////////////////
 
-parse_pipeline :: proc (state: ^State, input: string, commands_buffer: ^[dynamic] Command, allocator: runtime.Allocator) -> Pipeline {
+parse_pipeline :: proc (state: ^State, input: string, commands_buffer: ^[dynamic] Command, allocator: Allocator) -> Pipeline {
     parser: Parser
     parser.state = state
     parser.input = input
@@ -688,32 +710,38 @@ find_in_path :: proc (target: string) -> (string, bool) {
     return fullpath, ok
 }
 
-match_in_path :: proc (prefix: string) -> (string, bool) {
+matches_in_path :: proc (matches: ^[dynamic; $N] string, prefix: string, allocator: Allocator) {
     // @speed cache this
-    path_variable := os.get_env("PATH", context.temp_allocator)
-                
-    result: string
-    ok: bool
+    path_variable := os.get_env("PATH", allocator)
+    
     // @copypasta form find_in_path
-    for path_variable != "" {
+    match: for path_variable != "" {
         path_separator :: ";" when ODIN_OS == .Windows else ":"
         
         dir_path := chop(&path_variable, path_separator)
         
-        dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
+        dir_info, dir_error := os.read_all_directory_by_path(dir_path, allocator)
         if dir_error == nil {
             for info in dir_info {
                 if (os.Permissions_Execute_All & info.mode != {}) {
                     if strings.starts_with(info.name, prefix) {
-                        result = info.name
-                        ok = true
+                        // @hack to skip cases where the system echo and the builtin echo are added to matches.
+                        present: bool
+                        for match in matches {
+                            if match == info.name {
+                                present = true
+                                break
+                            }
+                        }
+                        
+                        if !present {
+                            append(matches, info.name)
+                        }
                     }
                 }
             }
         }
     }
-    
-    return result, ok
 }
 
 command_is_in_path :: proc (error: io.Writer, command: Command) -> bool {
