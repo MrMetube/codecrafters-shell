@@ -1,0 +1,11 @@
+echo a
+echo b
+pwd
+history
+history -a hist
+history -a hist
+pwd
+echo c
+echo d
+echo a
+history -a hist

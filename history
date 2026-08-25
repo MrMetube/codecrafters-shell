@@ -1,0 +1,21 @@
+echo a
+echo b
+pwd
+help
+history
+history -w ./history
+echo a
+echo b
+pwd
+help
+history
+history -w ./history
+history -a ./history
+echo a
+echo b
+pwd
+help
+history
+history -w ./history
+history -a ./history
+history -a ./history

@@ -25,6 +25,7 @@ Shell :: struct {
     jobs: [dynamic] Job,
     
     history: [dynamic] string,
+    history_append_from_index: int,
     history_is_navigating: bool, // @todo eww
     history_navigation_offset: int,
 }
@@ -496,24 +497,49 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 invalid = true
             } else if len(arguments) == 2 {
                 subcommand := shift(&arguments)
+                
                 switch subcommand {
                 case "-w":
                     print_history = false
                     file := shift(&arguments)
-                    handle, open_error := os.open(file, os.O_WRONLY | os.O_CREATE); assert(open_error == nil)
-                    defer { close_error := os.close(handle); assert(close_error == nil) }
                     
                     lines := strings.builder_make(shell.command_allocator)
+                    
                     for entry in shell.history {
-                        fmt.sbprintf(&lines, "%v\n", entry)
+                        fmt.sbprintln(&lines, entry)
                     }
-                    written, write_error := os.write(handle, lines.buf[:]); assert(write_error == nil)
-                    assert(written == len(lines.buf))
+                    
+                    write_error := os.write_entire_file(file, strings.to_string(lines))
+                    assert(write_error == nil)
+                    
+                case "-a":
+                    print_history = false
+                    if len(shell.history) > shell.history_append_from_index {
+                        file := shift(&arguments)
+                        
+                        lines := strings.builder_make(shell.command_allocator)
+                        
+                        data, read_error := os.read_entire_file(file, shell.command_allocator)
+                        if read_error == nil {
+                            fmt.sbprint(&lines, transmute(string) data)
+                        }
+                        
+                        for entry in shell.history[shell.history_append_from_index:] {
+                            fmt.sbprintln(&lines, entry)
+                        }
+                        shell.history_append_from_index = len(shell.history)
+                        
+                        write_error := os.write_entire_file(file, strings.to_string(lines))
+                        assert(write_error == nil)
+                    }
                     
                 case "-r":
                     print_history = false
                     file := shift(&arguments)
-                    data, ok := os.read_entire_file(file, allocator = shell.command_allocator)
+                    
+                    data, read_error := os.read_entire_file(file, allocator = shell.command_allocator)
+                    assert(read_error == nil)
+                    
                     lines := transmute(string) data
                     last: string
                     for line in strings.split_lines_iterator(&lines) {
