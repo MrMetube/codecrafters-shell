@@ -108,10 +108,10 @@ main :: proc () {
     
     cmd_buf := make([dynamic] Command, shell.allocator)
     
-    terminal_data, terminal_ok := begin_terminal_mode()
-    assert(terminal_ok)
-    defer end_terminal_mode(terminal_data)
+    begin_terminal_mode()
+    defer end_terminal_mode()
     
+    input_buffer: [4096] u8
     for !shell.exit {
         free_all(shell.command_allocator)
         clear(&cmd_buf)
@@ -120,184 +120,14 @@ main :: proc () {
         
         redraw_prompt("")
         
-        typed:   [dynamic; 4096] u8
-        matches: [dynamic; 2048] string
-        
-        read_character :: proc (reader: io.Reader) -> u8 {
-            read_buffer: [1] u8
-            read_count, read_error := io.read(reader, read_buffer[:])
-            if read_error != nil {
-                fmt.panicf("ERROR: failed to read : %v\n", read_error)
-            }
-            
-            result := read_buffer[0]
-            return result
-        }
-        
-        input: for {
-            typed_character := read_character(reader)
-            
-            reset_matches := true
-            switch typed_character {
-            case '\x1b':
-                // @speed two/three read calls
-                bracket_character := read_character(reader)
-                assert(bracket_character == '[')
-                escaped_character := read_character(reader)
-                Escaped :: enum u8 {
-                    up    = 'A',
-                    down  = 'B',
-                    right = 'C',
-                    left  = 'D',
-                }
-                
-                direction := cast(Escaped) escaped_character
-                
-                if len(shell.history) != 0 {
-                    if !shell.history_is_navigating {
-                        shell.history_is_navigating = true
-                    } else {
-                        if direction == .up {
-                            shell.history_navigation_offset += 1
-                            if shell.history_navigation_offset > len(shell.history)-1 {
-                                shell.history_navigation_offset = len(shell.history)-1
-                            }
-                        } else if direction == .down {
-                            shell.history_navigation_offset -= 1
-                            if shell.history_navigation_offset < 0 {
-                                shell.history_navigation_offset = 0
-                            }
-                        }
-                    }
-                    
-                    index := len(shell.history)-1-shell.history_navigation_offset
-                    entry := shell.history[index]
-                    copy_to_buffer(&typed, entry)
-                }
-                
-            case '\t':
-                reset_matches = false
-                if len(matches) == 0 {
-                    prefix := transmute(string) typed[:]
-                    for command in shell.builtins {
-                        if strings.starts_with(command, prefix) {
-                            append(&matches, command)
-                        }
-                    }
-                    
-                    matches_in_path :: proc (matches: ^[dynamic; $N] string, prefix: string, allocator: Allocator) {
-                        // @speed cache this
-                        path_variable := os.get_env("PATH", allocator)
-                        
-                        // @copypasta form find_in_path
-                        match: for path_variable != "" {
-                            path_separator :: ";" when ODIN_OS == .Windows else ":"
-                            
-                            dir_path := chop(&path_variable, path_separator)
-                            
-                            dir_info, dir_error := os.read_all_directory_by_path(dir_path, allocator)
-                            if dir_error == nil {
-                                for info in dir_info {
-                                    if (os.Permissions_Execute_All & info.mode != {}) {
-                                        if strings.starts_with(info.name, prefix) {
-                                            // @hack to skip cases where the system echo and the builtin echo are added to matches.
-                                            present: bool
-                                            for match in matches {
-                                                if match == info.name {
-                                                    present = true
-                                                    break
-                                                }
-                                            }
-                                            
-                                            if !present {
-                                                append(matches, info.name)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    matches_in_path(&matches, prefix, shell.command_allocator)
-                    slice.sort(matches[:])
-                    
-                    switch len(matches) {
-                    case 0:
-                        fmt.print('\a')
-                        
-                    case 1:
-                        copy_to_buffer(&typed, transmute([] u8) matches[0])
-                        append(&typed, ' ')
-                        reset_matches = true
-                        
-                    case:
-                        longer_prefix_found: bool
-                        longer_prefix: string
-                        first := matches[0]
-                        // @speed
-                        for i in 0..<len(first)-len(prefix) {
-                            // lexical sorting ensures that the shortes common-prefix would appear before longer matches with that prefix
-                            longer_prefix = first[:len(first)-i]
-                            longer_prefix_found = true
-                            for other in matches[1:] {
-                                if !strings.starts_with(other, longer_prefix) {
-                                    longer_prefix_found = false
-                                    break
-                                }
-                            }
-                            
-                            if longer_prefix_found {
-                                break
-                            }
-                        }
-                        
-                        if !longer_prefix_found {   
-                            fmt.print('\a')
-                        } else if longer_prefix != prefix {
-                            copy_to_buffer(&typed, transmute([] u8) longer_prefix)
-                            reset_matches = true
-                        }
-                    }
-                } else {
-                    fmt.printf("\n")
-                    for match, index in matches {
-                        if index > 0 { fmt.printf("  ") }
-                        fmt.printf("%v", match)
-                    }
-                    fmt.printf("\n")
-                }
-                
-            case '\b', 0x7F:
-                if len(typed) > 0 {
-                    typed[len(typed)-1] = 0
-                    resize(&typed, len(typed)-1)
-                }
-                   
-            case '\n':
-                append(&typed, typed_character)
-                break input
-                
-            case:
-                append(&typed, typed_character)
-            }
-            
-            if reset_matches {
-                clear(&matches)
-            }
-            
-            redraw_prompt(&typed)
-        }
-        redraw_prompt(&typed)
-        
-        input_text := transmute(string) typed[:]
-        input_text = strings.trim_space(input_text)
+        input_text := get_user_input(&shell, reader, input_buffer[:])
         
         if input_text != "" {
             shell.history_is_navigating     = false
             shell.history_navigation_offset = 0
             add_to_history(&shell, input_text)
         }
+        
         pipeline := parse_pipeline(&shell, input_text, &cmd_buf, shell.command_allocator)
         // assert that command's arguments are not empty
         
@@ -342,7 +172,7 @@ main :: proc () {
                         append(&command.arguments, strings.clone(strings.to_string(prev_output), shell.command_allocator))
                     }
                     
-                    if index < len(pipeline.commands)-1 {
+                    if index < len(pipes)-1 {
                         // @todo(viktor): just using the pipe.output causes an infinite stall/hang
                         this_output := strings.builder_make(shell.command_allocator)
                         eval_builtin(&shell, command, strings.to_writer(&this_output), error)
@@ -373,17 +203,206 @@ main :: proc () {
 
 ////////////////////////////////////////////////
 
+get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> string {
+    matches: [dynamic; 2048] string
+    typed: [dynamic] u8
+    {
+        raw := cast(^runtime.Raw_Dynamic_Array) &typed
+        raw^ = { data = raw_data(buffer), cap = len(buffer) }
+    }
+    
+    read_character :: proc (reader: io.Reader) -> u8 {
+        read_buffer: [1] u8
+        read_count, read_error := io.read(reader, read_buffer[:])
+        if read_error != nil {
+            fmt.panicf("ERROR: failed to read : %v\n", read_error)
+        }
+        
+        result := read_buffer[0]
+        return result
+    }
+        
+    input: for {
+        typed_character := read_character(reader)
+        
+        submitted: bool
+        reset_matches := true
+        
+        switch typed_character {
+        case '\x1b':
+            // @speed two/three read calls
+            bracket_character := read_character(reader)
+            assert(bracket_character == '[')
+            escaped_character := read_character(reader)
+            Escaped :: enum u8 {
+                up    = 'A',
+                down  = 'B',
+                right = 'C',
+                left  = 'D',
+            }
+            
+            direction := cast(Escaped) escaped_character
+            
+            if len(shell.history) != 0 {
+                if !shell.history_is_navigating {
+                    shell.history_is_navigating = true
+                } else {
+                    if direction == .up {
+                        shell.history_navigation_offset += 1
+                        if shell.history_navigation_offset > len(shell.history)-1 {
+                            shell.history_navigation_offset = len(shell.history)-1
+                        }
+                    } else if direction == .down {
+                        shell.history_navigation_offset -= 1
+                        if shell.history_navigation_offset < 0 {
+                            shell.history_navigation_offset = 0
+                        }
+                    }
+                }
+                
+                index := len(shell.history)-1-shell.history_navigation_offset
+                entry := shell.history[index]
+                copy_to_buffer(&typed, entry)
+            }
+            
+        case '\t':
+            if len(matches) != 0 {
+                fmt.printf("\n")
+                for match, index in matches {
+                    if index > 0 { fmt.printf("  ") }
+                    fmt.printf("%v", match)
+                }
+                fmt.printf("\n")
+            } else {
+                prefix := transmute(string) typed[:]
+                for command in shell.builtins {
+                    if strings.starts_with(command, prefix) {
+                        append(&matches, command)
+                    }
+                }
+                
+                matches_in_path :: proc (matches: ^[dynamic; $N] string, prefix: string, allocator: Allocator) {
+                    // @speed cache this
+                    path_variable := os.get_env("PATH", allocator)
+                    
+                    // @copypasta form find_in_path
+                    match: for path_variable != "" {
+                        path_separator :: ";" when ODIN_OS == .Windows else ":"
+                        
+                        dir_path := chop(&path_variable, path_separator)
+                        
+                        dir_info, dir_error := os.read_all_directory_by_path(dir_path, allocator)
+                        if dir_error == nil {
+                            for info in dir_info {
+                                if (os.Permissions_Execute_All & info.mode != {}) {
+                                    if strings.starts_with(info.name, prefix) {
+                                        // @hack to skip cases where the system echo and the builtin echo are added to matches.
+                                        present: bool
+                                        for match in matches {
+                                            if match == info.name {
+                                                present = true
+                                                break
+                                            }
+                                        }
+                                        
+                                        if !present {
+                                            append(matches, info.name)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                matches_in_path(&matches, prefix, shell.command_allocator)
+                slice.sort(matches[:])
+                
+                action:            enum { Bell, Copy } = .Bell
+                action_source:     string
+                action_plus_space: bool
+                
+                switch len(matches) {
+                case 0: // nothing
+                    
+                case 1:
+                    action            = .Copy
+                    action_source     = matches[0]
+                    action_plus_space = true
+                    
+                case:
+                    first := matches[0]
+                    
+                    length := len(prefix)
+                    longer: for {
+                        for other in matches {
+                            if length >= len(other) || other[length] != first[length] {
+                                break longer
+                            }
+                        }
+                        
+                        length += 1
+                    }
+                    
+                    if length != len(prefix) {
+                        action        = .Copy
+                        action_source = first[:length]
+                    }
+                }
+                
+                switch action {
+                case .Bell:
+                    fmt.print('\a')
+                    reset_matches = false
+                    
+                case .Copy:
+                    copy_to_buffer(&typed, action_source)
+                    if action_plus_space {
+                        append(&typed, ' ')
+                    }
+                }
+            }
+            
+        case '\b', 0x7F:
+            if len(typed) > 0 {
+                typed[len(typed)-1] = 0
+                resize(&typed, len(typed)-1)
+            }
+                
+        case '\n':
+            append(&typed, typed_character)
+            submitted = true
+            
+        case:
+            append(&typed, typed_character)
+        }
+        
+        if reset_matches {
+            clear(&matches)
+        }
+        
+        redraw_prompt(typed)
+        if submitted { break input }
+    }
+    
+    input_text := transmute(string) typed[:]
+    input_text = strings.trim_space(input_text)
+    return input_text
+}
+
+////////////////////////////////////////////////
+
 redraw_prompt :: proc { redraw_prompt_b, redraw_prompt_s }
-redraw_prompt_b :: proc (buffer: ^[dynamic; $N] u8) { redraw_prompt(transmute(string) buffer[:]) }
+redraw_prompt_b :: proc (buffer: [dynamic] u8) { redraw_prompt(transmute(string) buffer[:]) }
 redraw_prompt_s :: proc (line: string) {
     fmt.printf("\r\x1b[2K$ %s", line)
 }
 copy_to_buffer :: proc { copy_to_buffer_b, copy_to_buffer_s }
-copy_to_buffer_b :: proc (destination: ^[dynamic; $N] u8, source: [] u8) {
+copy_to_buffer_b :: proc (destination: ^[dynamic] u8, source: [] u8) {
     resize(destination, len(source))
     copy(destination[:], source)
 }
-copy_to_buffer_s :: proc (destination: ^[dynamic; $N] u8, source: string) { copy_to_buffer(destination, transmute([] u8) source) }
+copy_to_buffer_s :: proc (destination: ^[dynamic] u8, source: string) { copy_to_buffer(destination, transmute([] u8) source) }
 
 ////////////////////////////////////////////////
 

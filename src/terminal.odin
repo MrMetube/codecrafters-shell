@@ -1,23 +1,20 @@
 #+build linux
 package main
 
-import "core:fmt"
 import "core:sys/posix"
 
-begin_terminal_mode :: proc () -> (rawptr, bool) {
-    // @slop
+original: posix.termios
+
+begin_terminal_mode :: proc () {
     if !posix.isatty(posix.STDIN_FILENO) {
-        fmt.eprintln("stdin is not a terminal")
-        return nil, false
+        panic("stdin is not a terminal")
     }
     
-    original := new(posix.termios)
-    if posix.tcgetattr(posix.STDIN_FILENO, original) != .OK {
-        fmt.eprintln("tcgetattr failed")
-        return nil, false
+    if posix.tcgetattr(posix.STDIN_FILENO, &original) != .OK {
+        panic("tcgetattr should not fail")
     }
     
-    raw := original^
+    raw := original
     raw.c_lflag -= { .ECHO, .ICANON }
     
     // Read one byte at a time.
@@ -25,17 +22,10 @@ begin_terminal_mode :: proc () -> (rawptr, bool) {
     raw.c_cc[auto_cast posix.VTIME] = 0
     
     if posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &raw) != .OK {
-        fmt.eprintln("tcsetattr failed")
-        return original, false
+        panic("tcsetattr should not fail")
     }
-    
-    return original, true
 }
 
-end_terminal_mode :: proc (data: rawptr) {
-    if data != nil {
-        original := cast(^posix.termios) data
-        posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, original)
-        free(original)
-    }
+end_terminal_mode :: proc () {
+    posix.tcsetattr(posix.STDIN_FILENO, .TCSANOW, &original)
 }
