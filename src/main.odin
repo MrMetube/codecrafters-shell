@@ -346,16 +346,21 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                         }
                         
                         completer_command := &Command {
-                            arguments = make([dynamic] string, 0, 7, shell.command_allocator),
+                            arguments = make([dynamic] string, 0, 4, shell.command_allocator),
                         }
                         append(&completer_command.arguments, completer)
                         append(&completer_command.arguments, command, prefix, word_before_prefix)
+                        
+                        environment, _ := os.environ(shell.command_allocator)
+                        completer_environment := make([dynamic] string, 0, len(environment), shell.command_allocator)
+                        append(&completer_environment, fmt.aprintf("COMP_LINE=%v", text, allocator = shell.command_allocator))
+                        append(&completer_environment, fmt.aprintf("COMP_POINT=%v", len(text), allocator = shell.command_allocator)) // :CursorNavigation:
                         
                         input, output, pipe_error := os.pipe()
                         assert(pipe_error == nil)
                         
                         error := os.to_writer(output)
-                        start_command(shell, completer_command, { stdout = output }, error)
+                        start_command(shell, completer_command, { stdout = output, env = completer_environment[:] }, error)
                         os.close(output)
                         
                         _, _ = os.process_wait(completer_command.process)
