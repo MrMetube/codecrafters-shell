@@ -640,6 +640,13 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 }
             }
         }
+    } else if is_builtin(shell, "complete", command_name) {
+        if len(arguments) == 0 {
+            fmt.wprintf(output, "complete: invalid usage, expected atleast one argument\n")
+        } else {
+            argument := shift(&arguments)
+            fmt.printfln("complete with argument %q", argument)
+        }
     } else if is_builtin(shell, "type", command_name) {
         is_builtin := false
         
