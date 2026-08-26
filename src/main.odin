@@ -36,7 +36,7 @@ Shell :: struct {
 Pipeline :: struct {
     background: bool,
     
-    commands: ^[dynamic] Command,
+    _commands: ^[dynamic] Command,
     output: ^os.File,
     error:  ^os.File,
 }
@@ -110,7 +110,7 @@ main :: proc () {
     shell: Shell
     shell_init(&shell)
     
-    cmd_buf := make([dynamic] Command, shell.allocator)
+    commands := make([dynamic] Command, shell.allocator)
     
     begin_terminal_mode()
     defer end_terminal_mode()
@@ -118,7 +118,7 @@ main :: proc () {
     input_buffer: [4096] u8
     for !shell.exit {
         free_all(shell.command_allocator)
-        clear(&cmd_buf)
+        clear(&commands)
         
         reap_jobs_and_print(&shell, os.to_writer(os.stdout), show_running = false)
         
@@ -132,14 +132,14 @@ main :: proc () {
             add_to_history(&shell, input_text)
         }
         
-        pipeline := parse_pipeline(&shell, input_text, &cmd_buf, shell.command_allocator)
+        pipeline := parse_pipeline(&shell, input_text, &commands, shell.command_allocator)
         // assert that command's arguments are not empty
         
         output := os.to_writer(pipeline.output)
         error  := os.to_writer(pipeline.error)
         
         valid := true
-        for c in pipeline.commands {
+        for c in commands {
             if !command_valid(&shell, error, c) {
                 valid = false
             }
@@ -151,21 +151,21 @@ main :: proc () {
                 output: ^os.File,
             }
             
-            pipes := make([] Pipe, len(pipeline.commands), shell.command_allocator)
+            pipes := make([] Pipe, len(commands), shell.command_allocator)
             
-            for index in 0..<len(pipeline.commands)-1 {
+            for index in 0..<len(commands)-1 {
                 r, w, pipe_error  := os.pipe()
                 assert(pipe_error == nil)
                 pipes[index].output  = w
                 pipes[index+1].input = r
             }
             
-            for &command, index in pipeline.commands {
+            for &command, index in commands {
                 pipe := pipes[index]
                 
                 if command.is_builtin {
                     if index > 0 {
-                        prev    := pipeline.commands[index-1]
+                        prev    := commands[index-1]
                         prev_output := strings.builder_make(shell.command_allocator)
                         pipe_read_all(&prev_output, pipe.input)
                         
@@ -327,18 +327,46 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                         directory := chop_PATH(&path)
                         matches_in_directory(&matches, prefix, directory, shell.command_allocator, only_executables_and_deduplicate = true)
                     }
-                } else if last_space_index != len(text)-1 {
-                    dir, file := os.split_path(prefix)
-                    last_slash := strings.last_index(prefix, "/")
-                    if last_slash != -1 {
-                        last_space_index += last_slash+1
-                        directory, _ := os.join_path({shell.working_directory, prefix[:last_slash+1]}, shell.command_allocator)
-                        matches_in_directory(&matches, prefix[last_slash+1:], directory, shell.command_allocator, only_executables_and_deduplicate = false)
-                    } else {
-                        matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
-                    }
                 } else {
-                    matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                    command := strings.trim_space(text[:last_space_index])
+                    if completer, ok := shell.completers[command]; ok {
+                        completer_command := &Command {
+                            arguments = make([dynamic] string, 0, 3, shell.command_allocator),
+                        }
+                        append(&completer_command.arguments, "/bin/sh", "-c")
+                        append(&completer_command.arguments, completer)
+                        
+                        input, output, pipe_error  := os.pipe()
+                        assert(pipe_error == nil)
+                        
+                        error := os.to_writer(output)
+                        start_command(shell, completer_command, { stdout = output }, error)
+                        os.close(output)
+                        
+                        _, _ = os.process_wait(completer_command.process)
+                        
+                        completer_output := strings.builder_make(shell.command_allocator)
+                        pipe_read_all(&completer_output, input)
+                        
+                        completer_lines := strings.to_string(completer_output)
+                        for line in strings.split_lines_iterator(&completer_lines) {
+                            append(&matches, Match { path = line, is_directory = false })
+                        }
+                    } else {
+                        if last_space_index != len(text)-1 {
+                            dir, file := os.split_path(prefix)
+                            last_slash := strings.last_index(prefix, "/")
+                            if last_slash != -1 {
+                                last_space_index += last_slash+1
+                                directory, _ := os.join_path({shell.working_directory, prefix[:last_slash+1]}, shell.command_allocator)
+                                matches_in_directory(&matches, prefix[last_slash+1:], directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                            } else {
+                                matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                            }
+                        } else {
+                            matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                        }
+                    }
                 }
                 
                 slice.sort_by(matches[:], proc (a, b: Match) -> bool { return a.path < b.path })
@@ -788,6 +816,7 @@ reap_jobs_and_print :: proc (shell: ^Shell, output: io.Writer, show_running := f
 ////////////////////////////////////////////////
 
 parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic] Command, allocator: Allocator) -> Pipeline {
+    commands := commands_buffer
     parser := Parser {
         shell = shell,
         input = input,
@@ -796,7 +825,6 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
         buffer    = strings.builder_make(allocator),
         
         pipeline = {
-            commands = commands_buffer,
             output   = os.stdout,
             error    = os.stderr,
         },
@@ -804,7 +832,7 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
     
     loop: for parser.input != "" {
         command := parse_command(&parser)
-        append(parser.pipeline.commands, command)
+        append(commands, command)
         
         before := parser.input
         peeked := parse_string(&parser)
