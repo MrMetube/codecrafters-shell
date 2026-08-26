@@ -648,9 +648,17 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         } else {
             argument := shift(&arguments)
             switch argument {
+            case "-C":
+                if len(arguments) < 2 {
+                    fmt.wprintf(output, "complete %v <command>: invalid usage, expected a command\n", argument)
+                } else {
+                    path    := shift(&arguments)
+                    program := shift(&arguments)
+                    shell.completers[program] = path
+                }
             case "-p":
                 if len(arguments) < 1 {
-                    fmt.wprintf(output, "complete -p <command>: invalid usage, expected a command\n")
+                    fmt.wprintf(output, "complete %v <command>: invalid usage, expected a command\n", argument)
                 } else {
                     program := shift(&arguments)
                     
