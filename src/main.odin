@@ -339,17 +339,15 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                     }
                     
                     if completer, ok := shell.completers[command]; ok {
-                        word_before_prefix: string
+                        word_before_prefix: string = command
                         second_to_last_space_index := strings.last_index(text_before_prefix, " ")
                         if second_to_last_space_index != -1 {
                             word_before_prefix = text_before_prefix[second_to_last_space_index+1:]
                         }
                         
-                        completer_command := &Command {
-                            arguments = make([dynamic] string, 0, 4, shell.command_allocator),
-                        }
-                        append(&completer_command.arguments, completer)
-                        append(&completer_command.arguments, command, prefix, word_before_prefix)
+                        completer_arguments := make([dynamic] string, 0, 4, shell.command_allocator)
+                        append(&completer_arguments, completer)
+                        append(&completer_arguments, command, prefix, word_before_prefix)
                         
                         environment, _ := os.environ(shell.command_allocator)
                         completer_environment := make([dynamic] string, 0, len(environment), shell.command_allocator)
@@ -360,10 +358,10 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                         assert(pipe_error == nil)
                         
                         error := os.to_writer(output)
-                        start_command(shell, completer_command, { stdout = output, env = completer_environment[:] }, error)
+                        completer_process := start_command(shell, completer_arguments[:], { stdout = output, env = completer_environment[:] }, error)
                         os.close(output)
                         
-                        _, _ = os.process_wait(completer_command.process)
+                        _, _ = os.process_wait(completer_process)
                         
                         completer_output := strings.builder_make(shell.command_allocator)
                         pipe_read_all(&completer_output, input)
@@ -576,18 +574,23 @@ eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, outp
     }
 }
 
-start_command :: proc (shell: ^Shell, command: ^Command, params: os.Process_Desc = {}, error: io.Writer) {
+start_command :: proc { start_command_command, start_command_raw }
+start_command_command :: proc (shell: ^Shell, command: ^Command, params: os.Process_Desc, error: io.Writer) {
+    process := start_command_raw(shell, command.arguments[:], params, error)
+    command.process = process
+}
+start_command_raw :: proc (shell: ^Shell, arguments: [] string, params: os.Process_Desc = {}, error: io.Writer) -> os.Process {
     params := params
-    params.command = command.arguments[:]
+    params.command = arguments
     params.working_dir = shell.working_directory
     
     process, start_error := os.process_start(params)
     if start_error != nil {
-        command_name := command.arguments[0]
+        command_name := arguments[0]
         fmt.wprintfln(error, "ERROR trying to start %v: %v", command_name, start_error)
     }
     
-    command.process = process
+    return process
 }
 
 pipe_read_all :: proc (buffer: ^strings.Builder, read_end: ^os.File) {
@@ -715,6 +718,14 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                     } else {
                         fmt.wprintf(output, "complete: %v: no completion specification\n", program)
                     }
+                }
+            case "-r":
+                if len(arguments) < 1 {
+                    fmt.wprintf(output, "complete %v <command>: invalid usage, expected a command\n", argument)
+                } else {
+                    program := shift(&arguments)
+                    // @leak key and value where cloned
+                    delete_key(&shell.completers, program)
                 }
             case:
                 fmt.printfln("complete: unknown subcommand %q", argument)

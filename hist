@@ -1,9 +1,0 @@
-echo a
-echo b
-history -w hist
-echo a
-echo b
-history -w hist
-pwd
-home
-history -a hist
