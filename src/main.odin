@@ -175,7 +175,7 @@ main :: proc () {
                     }
                     
                     if index < len(pipes)-1 {
-                        // @todo(viktor): just using the pipe.output causes an infinite stall/hang
+                        // @todo just using the pipe.output causes an infinite stall/hang
                         this_output := strings.builder_make(shell.command_allocator)
                         eval_builtin(&shell, command, strings.to_writer(&this_output), error)
                         os.write_string(pipe.output, strings.to_string(this_output))
@@ -225,10 +225,10 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
         return result
     }
         
-    input: for {
+    submitted: bool
+    for !submitted {
         typed_character := read_character(reader)
         
-        submitted: bool
         reset_matches := true
         
         switch typed_character {
@@ -405,7 +405,6 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
         }
         
         redraw_prompt(typed)
-        if submitted { break input }
     }
     
     input_text := as_string(typed)
@@ -518,7 +517,7 @@ eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, outp
         job^ = {
             state = .Running,
             process = command.process,
-            // @todo(viktor): quote args with a space
+            // @todo quote args with a space
             command_line = strings.join(command.arguments[:], " ", shell.allocator),
         }
         
@@ -780,7 +779,7 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
         
         
         switch peeked {
-            // @todo(viktor): dont accept more pipes or args, just more redirections and a background
+            // @todo dont accept more pipes or args, just more redirections and a background
         case "1>", ">":   parse_redirection(&parser, &parser.pipeline, .Create, .Out)
         case "2>":        parse_redirection(&parser, &parser.pipeline, .Create, .Err)
         case "1>>", ">>": parse_redirection(&parser, &parser.pipeline, .Append, .Out)
@@ -797,8 +796,8 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
             break loop
             
         case: 
-            // @note(viktor): reset what was peeked
-            // @todo(viktor): is anything else even valid?
+            // @note reset what was peeked
+            // @todo is anything else even valid?
             parser.input = before
         }
     }
@@ -848,7 +847,7 @@ command_is_builtin :: proc (state: ^Shell, command: Command) -> bool {
 
 parse_redirection :: proc (parser: ^Parser, pipeline: ^Pipeline, kind: Redirection_Kind, target: Target) {
     arg := parse_string(parser)
-    // @todo(viktor): handle empty result
+    // @todo handle empty result
     
     path := eval_path(parser.shell, arg)
     
@@ -858,7 +857,7 @@ parse_redirection :: proc (parser: ^Parser, pipeline: ^Pipeline, kind: Redirecti
         case .Append: flags += { .Append }
     }
     
-    // @todo(viktor): handle the error
+    // @todo handle the error
     handle, open_error := os.open(path, flags)
     assert(open_error == nil)
     
@@ -910,18 +909,12 @@ parse_string :: proc (parser: ^Parser) -> string {
             tasks -= { .escape_next }
             
             append_rune = true
-        } else if .space_is_break      in tasks && strings.is_space(r) {
-            break loop
-        } else if .double_quote_sets   in tasks && r == '\"' {
-            tasks = Double
-        } else if .double_quote_ends   in tasks && r == '\"' {
-            tasks = Normal
-        } else if .single_quote_sets   in tasks && r == '\'' {
-            tasks = Single
-        } else if .single_quote_ends   in tasks && r == '\'' {
-            tasks = Normal
-        } else if .backslash_is_escape in tasks && r == '\\' {
-            tasks += { .escape_next }
+        } else if .space_is_break      in tasks && strings.is_space(r) { break loop
+        } else if .double_quote_sets   in tasks && r == '\"'           { tasks = Double
+        } else if .double_quote_ends   in tasks && r == '\"'           { tasks = Normal
+        } else if .single_quote_sets   in tasks && r == '\''           { tasks = Single
+        } else if .single_quote_ends   in tasks && r == '\''           { tasks = Normal
+        } else if .backslash_is_escape in tasks && r == '\\'           { tasks += { .escape_next }
         } else {
             append_rune = true
         }
