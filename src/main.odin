@@ -29,6 +29,8 @@ Shell :: struct {
     history_append_from_index: int,
     history_is_navigating:     bool, // @todo eww
     history_navigation_offset: int,
+    
+    completers: map[string] string,
 }
 
 Pipeline :: struct {
@@ -79,10 +81,10 @@ shell_init :: proc (shell: ^Shell) {
     shell.working_directory, _ = os.get_working_directory(shell.allocator)
     shell.PATH                 = os.get_env("PATH", shell.allocator)
     
-    shell.builtins = make([dynamic] string, shell.allocator)
-    shell.jobs     = make([dynamic] Job, shell.allocator)
-    
-    clear(&shell.builtins)
+    shell.builtins   = make([dynamic] string,   shell.allocator)
+    shell.jobs       = make([dynamic] Job,      shell.allocator)
+    shell.history    = make([dynamic] string,   shell.allocator)
+    shell.completers = make(map[string] string, shell.allocator)
     
     dummy  := strings.builder_make(context.temp_allocator)
     writer := strings.to_writer(&dummy)
@@ -642,10 +644,26 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         }
     } else if is_builtin(shell, "complete", command_name) {
         if len(arguments) == 0 {
-            fmt.wprintf(output, "complete: invalid usage, expected atleast one argument\n")
+            fmt.wprintf(output, "complete <subcommand>: invalid usage, expected a subcommand\n")
         } else {
             argument := shift(&arguments)
-            fmt.printfln("complete with argument %q", argument)
+            switch argument {
+            case "-p":
+                if len(arguments) < 1 {
+                    fmt.wprintf(output, "complete -p <command>: invalid usage, expected a command\n")
+                } else {
+                    program := shift(&arguments)
+                    
+                    completer, ok := shell.completers[program]
+                    if ok {
+                        fmt.wprintf(output, "complete -C '%v' %v\n", completer, program)
+                    } else {
+                        fmt.wprintf(output, "complete: %v: no completion specification\n", program)
+                    }
+                }
+            case:
+                fmt.printfln("complete: unknown subcommand %q", argument)
+            }
         }
     } else if is_builtin(shell, "type", command_name) {
         is_builtin := false
