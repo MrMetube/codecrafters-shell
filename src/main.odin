@@ -328,15 +328,30 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                         matches_in_directory(&matches, prefix, directory, shell.command_allocator, only_executables_and_deduplicate = true)
                     }
                 } else {
-                    command := strings.trim_space(text[:last_space_index])
+                    text_before_prefix := strings.trim_space(text[:last_space_index])
+                    first_space_index := strings.index(text_before_prefix, " ")
+                    
+                    command: string
+                    if first_space_index != -1 {
+                        command = text_before_prefix[:first_space_index]
+                    } else {
+                        command = text_before_prefix
+                    }
+                    
                     if completer, ok := shell.completers[command]; ok {
-                        completer_command := &Command {
-                            arguments = make([dynamic] string, 0, 3, shell.command_allocator),
+                        word_before_prefix: string
+                        second_to_last_space_index := strings.last_index(text_before_prefix, " ")
+                        if second_to_last_space_index != -1 {
+                            word_before_prefix = text_before_prefix[second_to_last_space_index+1:]
                         }
-                        append(&completer_command.arguments, "/bin/sh", "-c")
-                        append(&completer_command.arguments, completer)
                         
-                        input, output, pipe_error  := os.pipe()
+                        completer_command := &Command {
+                            arguments = make([dynamic] string, 0, 7, shell.command_allocator),
+                        }
+                        append(&completer_command.arguments, completer)
+                        append(&completer_command.arguments, command, prefix, word_before_prefix)
+                        
+                        input, output, pipe_error := os.pipe()
                         assert(pipe_error == nil)
                         
                         error := os.to_writer(output)
