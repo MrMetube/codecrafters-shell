@@ -206,7 +206,8 @@ main :: proc () {
 ////////////////////////////////////////////////
 
 get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> string {
-    matches: [dynamic; 2048] string
+    Match :: struct { path: string, is_directory: bool }
+    matches: [dynamic; 2048] Match
     typed: [dynamic] u8
     {
         raw := cast(^runtime.Raw_Dynamic_Array) &typed
@@ -272,7 +273,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                 fmt.printf("\n")
                 for match, index in matches {
                     if index > 0 { fmt.printf("  ") }
-                    fmt.printf("%v", match)
+                    fmt.printf("%v", match.path)
                 }
                 fmt.printf("\n")
             } else {
@@ -282,10 +283,11 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                 action:            enum { Bell, Copy } = .Bell
                 action_source:     string
                 action_plus_space: bool
+                action_plus_slash: bool
                 
                 prefix := text[last_space_index+1:]
                 
-                matches_in_directory :: proc (matches: ^[dynamic; $N] string, prefix: string, directory: string, allocator: Allocator, only_executables_and_deduplicate: bool) {
+                matches_in_directory :: proc (matches: ^[dynamic; $N] Match, prefix: string, directory: string, allocator: Allocator, only_executables_and_deduplicate: bool) {
                     dir_info, dir_error := os.read_all_directory_by_path(directory, allocator)
                     if dir_error == nil {
                         files: for file in dir_info {
@@ -297,13 +299,13 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                                 if only_executables_and_deduplicate {
                                     // @hack to skip cases where the system echo and the builtin echo are added to matches.
                                     for match in matches {
-                                        if match == file.name {
+                                        if match.path == file.name {
                                             continue files
                                         }
                                     }
                                     
                                 }
-                                append(matches, file.name)
+                                append(matches, Match { file.name, file.type == .Directory })
                             }
                         }
                     }
@@ -313,7 +315,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                     assert(prefix == text)
                     for command in shell.builtins {
                         if strings.starts_with(command, prefix) {
-                            append(&matches, command)
+                            append(&matches, Match { command, false })
                         }
                     }
                     
@@ -323,6 +325,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                         matches_in_directory(&matches, prefix, directory, shell.command_allocator, only_executables_and_deduplicate = true)
                     }
                 } else if last_space_index != len(text)-1 {
+                    dir, file := os.split_path(prefix)
                     last_slash := strings.last_index(prefix, "/")
                     if last_slash == -1 {
                         matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
@@ -331,17 +334,23 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                         directory, _ := os.join_path({shell.working_directory, prefix[:last_slash+1]}, shell.command_allocator)
                         matches_in_directory(&matches, prefix[last_slash+1:], directory, shell.command_allocator, only_executables_and_deduplicate = false)
                     }
+                } else {
+                    matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
                 }
                 
-                slice.sort(matches[:])
+                slice.sort_by(matches[:], proc (a, b: Match) -> bool { return a.path < b.path })
                 
                 switch len(matches) {
                 case 0: // nothing
                     
                 case 1:
                     action            = .Copy
-                    action_source     = matches[0]
-                    action_plus_space = true
+                    action_source     = matches[0].path
+                    if matches[0].is_directory {
+                        action_plus_slash = true
+                    } else {
+                        action_plus_space = true
+                    }
                     
                 case:
                     first := matches[0]
@@ -349,7 +358,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                     length := len(prefix)
                     longer2: for {
                         for other in matches {
-                            if length >= len(other) || other[length] != first[length] {
+                            if length >= len(other.path) || other.path[length] != first.path[length] {
                                 break longer2
                             }
                         }
@@ -359,7 +368,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                     
                     if length != len(prefix) {
                         action        = .Copy
-                        action_source = first[:length]
+                        action_source = first.path[:length]
                     }
                 }
                 
@@ -371,9 +380,8 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                 case .Copy:   
                     resize(&typed, last_space_index+1)
                     append(&typed, ..as_bytes(action_source))
-                    if action_plus_space {
-                        append(&typed, ' ')
-                    }
+                    if action_plus_space { append(&typed, ' ') }
+                    if action_plus_slash { append(&typed, '/') }
                 }
             }
             
