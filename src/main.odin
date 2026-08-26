@@ -15,6 +15,7 @@ Shell :: struct {
     initialized: bool,
     
     working_directory: string,
+    PATH: string,
     exit: bool,
     
     allocator:         Allocator,
@@ -26,7 +27,7 @@ Shell :: struct {
     
     history: [dynamic] string,
     history_append_from_index: int,
-    history_is_navigating: bool, // @todo eww
+    history_is_navigating:     bool, // @todo eww
     history_navigation_offset: int,
 }
 
@@ -48,8 +49,8 @@ Command :: struct {
 Target :: enum { Out, Err }
 
 Job :: struct {
-    state: Job_State,
-    process: os.Process,
+    state:        Job_State,
+    process:      os.Process,
     command_line: string,
 }
 
@@ -64,7 +65,7 @@ Parser :: struct {
     allocator: Allocator,
     
     buffer: strings.Builder,
-    input: string,
+    input:  string,
     
     pipeline: Pipeline,
 }
@@ -76,6 +77,7 @@ shell_init :: proc (shell: ^Shell) {
     shell.allocator         = context.allocator
     
     shell.working_directory, _ = os.get_working_directory(shell.allocator)
+    shell.PATH                 = os.get_env("PATH", shell.allocator)
     
     shell.builtins = make([dynamic] string, shell.allocator)
     shell.jobs     = make([dynamic] Job, shell.allocator)
@@ -136,7 +138,7 @@ main :: proc () {
         
         valid := true
         for c in pipeline.commands {
-            if !command_valid(error, c) {
+            if !command_valid(&shell, error, c) {
                 valid = false
             }
         }
@@ -274,53 +276,57 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                 }
                 fmt.printf("\n")
             } else {
-                prefix := transmute(string) typed[:]
-                for command in shell.builtins {
-                    if strings.starts_with(command, prefix) {
-                        append(&matches, command)
-                    }
-                }
+                text := as_string(typed)
+                last_space_index := strings.last_index(text, " ")
                 
-                matches_in_path :: proc (matches: ^[dynamic; $N] string, prefix: string, allocator: Allocator) {
-                    // @speed cache this
-                    path_variable := os.get_env("PATH", allocator)
-                    
-                    // @copypasta form find_in_path
-                    match: for path_variable != "" {
-                        path_separator :: ";" when ODIN_OS == .Windows else ":"
-                        
-                        dir_path := chop(&path_variable, path_separator)
-                        
-                        dir_info, dir_error := os.read_all_directory_by_path(dir_path, allocator)
-                        if dir_error == nil {
-                            for info in dir_info {
-                                if (os.Permissions_Execute_All & info.mode != {}) {
-                                    if strings.starts_with(info.name, prefix) {
-                                        // @hack to skip cases where the system echo and the builtin echo are added to matches.
-                                        present: bool
-                                        for match in matches {
-                                            if match == info.name {
-                                                present = true
-                                                break
-                                            }
-                                        }
-                                        
-                                        if !present {
-                                            append(matches, info.name)
+                action:            enum { Bell, Copy } = .Bell
+                action_source:     string
+                action_plus_space: bool
+                
+                prefix := text[last_space_index+1:]
+                
+                matches_in_directory :: proc (matches: ^[dynamic; $N] string, prefix: string, directory: string, allocator: Allocator, only_executables_and_deduplicate: bool) {
+                    dir_info, dir_error := os.read_all_directory_by_path(directory, allocator)
+                    if dir_error == nil {
+                        files: for file in dir_info {
+                            if only_executables_and_deduplicate && (os.Permissions_Execute_All & file.mode == {}) {
+                                continue files
+                            }
+                            
+                            if strings.starts_with(file.name, prefix) {
+                                if only_executables_and_deduplicate {
+                                    // @hack to skip cases where the system echo and the builtin echo are added to matches.
+                                    for match in matches {
+                                        if match == file.name {
+                                            continue files
                                         }
                                     }
+                                    
                                 }
+                                append(matches, file.name)
                             }
                         }
                     }
                 }
                 
-                matches_in_path(&matches, prefix, shell.command_allocator)
-                slice.sort(matches[:])
+                if last_space_index == -1 {
+                    assert(prefix == text)
+                    for command in shell.builtins {
+                        if strings.starts_with(command, prefix) {
+                            append(&matches, command)
+                        }
+                    }
+                    
+                    path := shell.PATH
+                    for path != "" {
+                        directory := chop_PATH(&path)
+                        matches_in_directory(&matches, prefix, directory, shell.command_allocator, only_executables_and_deduplicate = true)
+                    }
+                } else if last_space_index != len(text)-1 {
+                    matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                }
                 
-                action:            enum { Bell, Copy } = .Bell
-                action_source:     string
-                action_plus_space: bool
+                slice.sort(matches[:])
                 
                 switch len(matches) {
                 case 0: // nothing
@@ -334,10 +340,10 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                     first := matches[0]
                     
                     length := len(prefix)
-                    longer: for {
+                    longer2: for {
                         for other in matches {
                             if length >= len(other) || other[length] != first[length] {
-                                break longer
+                                break longer2
                             }
                         }
                         
@@ -355,8 +361,9 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                     fmt.print('\a')
                     reset_matches = false
                     
-                case .Copy:
-                    copy_to_buffer(&typed, action_source)
+                case .Copy:   
+                    resize(&typed, last_space_index+1)
+                    append(&typed, ..as_bytes(action_source))
                     if action_plus_space {
                         append(&typed, ' ')
                     }
@@ -385,7 +392,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
         if submitted { break input }
     }
     
-    input_text := transmute(string) typed[:]
+    input_text := as_string(typed)
     input_text = strings.trim_space(input_text)
     return input_text
 }
@@ -393,7 +400,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
 ////////////////////////////////////////////////
 
 redraw_prompt :: proc { redraw_prompt_b, redraw_prompt_s }
-redraw_prompt_b :: proc (buffer: [dynamic] u8) { redraw_prompt(transmute(string) buffer[:]) }
+redraw_prompt_b :: proc (buffer: [dynamic] u8) { redraw_prompt(as_string(buffer)) }
 redraw_prompt_s :: proc (line: string) {
     fmt.printf("\r\x1b[2K$ %s", line)
 }
@@ -402,7 +409,12 @@ copy_to_buffer_b :: proc (destination: ^[dynamic] u8, source: [] u8) {
     resize(destination, len(source))
     copy(destination[:], source)
 }
-copy_to_buffer_s :: proc (destination: ^[dynamic] u8, source: string) { copy_to_buffer(destination, transmute([] u8) source) }
+copy_to_buffer_s :: proc (destination: ^[dynamic] u8, source: string) { copy_to_buffer(destination, as_bytes(source)) }
+
+as_string :: proc { as_string_array, as_string_slice }
+as_string_slice :: proc (bytes: [] u8)        -> string { return transmute(string) bytes    }
+as_string_array :: proc (bytes: [dynamic] u8) -> string { return transmute(string) bytes[:] }
+as_bytes :: proc (s: string) -> [] u8 { return transmute([] u8) s }
 
 ////////////////////////////////////////////////
 
@@ -414,7 +426,7 @@ read_history_from_file :: proc (shell: ^Shell, file: string) {
     data, read_error := os.read_entire_file(file, allocator = shell.command_allocator)
     assert(read_error == nil)
     
-    lines := transmute(string) data
+    lines := as_string(data)
     last: string
     for line in strings.split_lines_iterator(&lines) {
         if last != "" {
@@ -460,7 +472,7 @@ write_history_to_file :: proc (shell: ^Shell, file: string, append: bool) {
 
 eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
     error := os.to_writer(pipeline.error)
-    if !command_is_in_path(error, command^) { return }
+    if !command_is_in_path(shell, error, command^) { return }
     
     start_command(shell, command, { stdout = pipeline.output, stderr = pipeline.error, stdin = input }, error)
     
@@ -627,7 +639,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         if is_builtin {
             fmt.wprintfln(output, "%v is a shell builtin", exe_name)
         } else {
-            fullpath, found := find_in_path(exe_name)
+            fullpath, found := find_in_path(shell, exe_name, shell.command_allocator)
             if found {
                 fmt.wprintfln(output, "%v is %v", exe_name, fullpath)
             } else {
@@ -913,18 +925,22 @@ parse_string :: proc (parser: ^Parser) -> string {
 
 ////////////////////////////////////////////////
 
-command_valid :: proc (error: io.Writer, command: Command) -> bool { return command.is_builtin || command_is_in_path(error, command) } 
+command_valid :: proc (shell: ^Shell, error: io.Writer, command: Command) -> bool { return command.is_builtin || command_is_in_path(shell, error, command) } 
 
-find_in_path :: proc (target: string) -> (string, bool) {
+chop_PATH :: proc (path: ^string) -> string {
+    path_separator :: ";" when ODIN_OS == .Windows else ":"
+    result := chop(path, path_separator)
+    return result
+}
+
+find_in_path :: proc (shell: ^Shell, target: string, allocator: Allocator) -> (string, bool) {
     // @speed cache this
-    path_variable := os.get_env("PATH", context.temp_allocator)
-                
+    path_variable := os.get_env("PATH", allocator)
+    path_variable = shell.PATH
     fullpath: string
     ok: bool
     for path_variable != "" {
-        path_separator :: ";" when ODIN_OS == .Windows else ":"
-        
-        dir_path := chop(&path_variable, path_separator)
+        dir_path := chop_PATH(&path_variable)
         
         dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
         if dir_error == nil {
@@ -942,12 +958,12 @@ find_in_path :: proc (target: string) -> (string, bool) {
     return fullpath, ok
 }
 
-command_is_in_path :: proc (error: io.Writer, command: Command) -> bool {
+command_is_in_path :: proc (shell: ^Shell, error: io.Writer, command: Command) -> bool {
     if len(command.arguments) == 0 do return false
     
     name := command.arguments[0]
     
-    _, result := find_in_path(name)
+    _, result := find_in_path(shell, name, shell.command_allocator)
     if !result {
         fmt.wprintfln(error, "%v: command not found", name)
     }
