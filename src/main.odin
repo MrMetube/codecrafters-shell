@@ -323,7 +323,14 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                         matches_in_directory(&matches, prefix, directory, shell.command_allocator, only_executables_and_deduplicate = true)
                     }
                 } else if last_space_index != len(text)-1 {
-                    matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                    last_slash := strings.last_index(prefix, "/")
+                    if last_slash == -1 {
+                        matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                    } else {
+                        last_space_index += last_slash+1
+                        directory, _ := os.join_path({shell.working_directory, prefix[:last_slash+1]}, shell.command_allocator)
+                        matches_in_directory(&matches, prefix[last_slash+1:], directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                    }
                 }
                 
                 slice.sort(matches[:])
