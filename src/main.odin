@@ -272,8 +272,9 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
             if len(matches) != 0 {
                 fmt.printf("\n")
                 for match, index in matches {
-                    if index > 0 { fmt.printf("  ") }
-                    fmt.printf("%v", match.path)
+                    if index > 0 { fmt.print("  ") }
+                    fmt.print(match.path)
+                    if match.is_directory { fmt.print("/") }
                 }
                 fmt.printf("\n")
             } else {
@@ -327,12 +328,12 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
                 } else if last_space_index != len(text)-1 {
                     dir, file := os.split_path(prefix)
                     last_slash := strings.last_index(prefix, "/")
-                    if last_slash == -1 {
-                        matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
-                    } else {
+                    if last_slash != -1 {
                         last_space_index += last_slash+1
                         directory, _ := os.join_path({shell.working_directory, prefix[:last_slash+1]}, shell.command_allocator)
                         matches_in_directory(&matches, prefix[last_slash+1:], directory, shell.command_allocator, only_executables_and_deduplicate = false)
+                    } else {
+                        matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
                     }
                 } else {
                     matches_in_directory(&matches, prefix, shell.working_directory, shell.command_allocator, only_executables_and_deduplicate = false)
