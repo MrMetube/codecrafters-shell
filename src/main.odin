@@ -559,12 +559,21 @@ eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, outp
             append_nothing(&shell.jobs)
         }
         
+        command_line := strings.builder_make(shell.allocator)
+        fmt.sbprint(&command_line, command.arguments[0])
+        for argument in command.arguments[1:] {
+            if strings.contains_space(argument) {
+                fmt.sbprintf(&command_line, " %q", argument)
+            } else {
+                fmt.sbprintf(&command_line, " %v", argument)
+            }
+        }
+        
         job := &shell.jobs[index]
         job^ = {
-            state = .Running,
-            process = command.process,
-            // @todo quote args with a space
-            command_line = strings.join(command.arguments[:], " ", shell.allocator),
+            state        = .Running,
+            process      = command.process,
+            command_line = strings.to_string(command_line),
         }
         
         id := index + 1
@@ -1041,7 +1050,6 @@ parse_string :: proc (parser: ^Parser) -> string {
     
     Flags :: bit_set[ enum {
         space_is_break,
-        dollar_is_break,
         
         double_quote_sets,
         double_quote_ends,
@@ -1055,8 +1063,8 @@ parse_string :: proc (parser: ^Parser) -> string {
         // transient flags
         escape_next,
     }]
-    // nocheckin 
-    Normal :: Flags { .space_is_break, /* .dollar_is_break, */ .double_quote_sets, .single_quote_sets, .backslash_is_escape }
+    
+    Normal :: Flags { .space_is_break, .double_quote_sets, .single_quote_sets, .backslash_is_escape }
     Single :: Flags { .single_quote_ends }
     Double :: Flags { .double_quote_ends, .backslash_is_escape, .escape_only_special }
     
@@ -1082,7 +1090,6 @@ parse_string :: proc (parser: ^Parser) -> string {
             
             append_rune = true
         } else if .space_is_break      in tasks && strings.is_space(r) { break loop
-        } else if .dollar_is_break     in tasks && r == '$'            { break loop
         } else if .double_quote_sets   in tasks && r == '\"'           { tasks = Double
         } else if .double_quote_ends   in tasks && r == '\"'           { tasks = Normal
         } else if .single_quote_sets   in tasks && r == '\''           { tasks = Single
