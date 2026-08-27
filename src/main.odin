@@ -726,8 +726,9 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                     fmt.wprintf(output, "complete %v <command>: invalid usage, expected a command\n", argument)
                 } else {
                     program := shift(&arguments)
-                    // @leak key and value where cloned
-                    delete_key(&shell.completers, program)
+                    key, value := delete_key(&shell.completers, program)
+                    delete(key,   shell.allocator)
+                    delete(value, shell.allocator)
                 }
             case:
                 fmt.printfln("complete: unknown subcommand %q", argument)
@@ -747,7 +748,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                         name := shift(&arguments)
                         value, ok := shell.declarations[name]
                         if ok {
-                            fmt.wprintf(output, "declare -- %v=%v\n", name, value)
+                            fmt.wprintf(output, "declare -- %v=%q\n", name, value)
                         } else {
                             fmt.wprintf(output, "declare: %v: not found\n", name)
                         }
@@ -758,7 +759,9 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                     } else {
                         variable := shift(&arguments)
                         // @leak key and value where cloned
-                        delete_key(&shell.declarations, variable)
+                        key, value := delete_key(&shell.declarations, variable)
+                        delete(key,   shell.allocator)
+                        delete(value, shell.allocator)
                     }
                 case:
                     fmt.wprintfln(output, "declare: unknown subcommand %q", argument)
@@ -767,7 +770,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 declaration := shift(&arguments)
                 name, ok := chop(&declaration, "=")
                 if ok {
-                    name    := strings.clone(name,        shell.allocator)
+                    name  := strings.clone(name,        shell.allocator)
                     value := strings.clone(declaration, shell.allocator)
                     shell.declarations[name] = value
                 } else {
