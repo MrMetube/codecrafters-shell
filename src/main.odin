@@ -30,7 +30,8 @@ Shell :: struct {
     history_is_navigating:     bool, // @todo eww
     history_navigation_offset: int,
     
-    completers: map[string] string,
+    completers:   map[string] string,
+    declarations: map[string] string,
 }
 
 Pipeline :: struct {
@@ -81,10 +82,11 @@ shell_init :: proc (shell: ^Shell) {
     shell.working_directory, _ = os.get_working_directory(shell.allocator)
     shell.PATH                 = os.get_env("PATH", shell.allocator)
     
-    shell.builtins   = make([dynamic] string,   shell.allocator)
-    shell.jobs       = make([dynamic] Job,      shell.allocator)
-    shell.history    = make([dynamic] string,   shell.allocator)
-    shell.completers = make(map[string] string, shell.allocator)
+    shell.builtins     = make([dynamic] string,   shell.allocator)
+    shell.jobs         = make([dynamic] Job,      shell.allocator)
+    shell.history      = make([dynamic] string,   shell.allocator)
+    shell.completers   = make(map[string] string, shell.allocator)
+    shell.declarations = make(map[string] string, shell.allocator)
     
     dummy  := strings.builder_make(context.temp_allocator)
     writer := strings.to_writer(&dummy)
@@ -729,6 +731,44 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 }
             case:
                 fmt.printfln("complete: unknown subcommand %q", argument)
+            }
+        }
+    } else if is_builtin(shell, "declare", command_name) {
+        if len(arguments) == 0 {
+            fmt.wprintf(output, "declare <subcommand>: invalid usage, expected a subcommand\n")
+        } else {
+            argument := shift(&arguments)
+            switch argument {
+            case "-C":
+                if len(arguments) < 2 {
+                    fmt.wprintf(output, "declare %v <variable>: invalid usage, expected a variable\n", argument)
+                } else {
+                    path    := strings.clone(shift(&arguments), shell.allocator)
+                    program := strings.clone(shift(&arguments), shell.allocator)
+                    shell.declarations[program] = path
+                }
+            case "-p":
+                if len(arguments) < 1 {
+                    fmt.wprintf(output, "declare %v <variable>: invalid usage, expected a variable\n", argument)
+                } else {
+                    variable := shift(&arguments)
+                    completer, ok := shell.declarations[variable]
+                    if ok {
+                        fmt.wprintf(output, "declare -C '%v' %v\n", completer, variable)
+                    } else {
+                        fmt.wprintf(output, "declare: %v: not found\n", variable)
+                    }
+                }
+            case "-r":
+                if len(arguments) < 1 {
+                    fmt.wprintf(output, "declare %v <variable>: invalid usage, expected a variable\n", argument)
+                } else {
+                    variable := shift(&arguments)
+                    // @leak key and value where cloned
+                    delete_key(&shell.declarations, variable)
+                }
+            case:
+                fmt.printfln("declare: unknown subcommand %q", argument)
             }
         }
     } else if is_builtin(shell, "type", command_name) {
