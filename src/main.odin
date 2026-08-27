@@ -511,7 +511,7 @@ write_history_to_file :: proc (shell: ^Shell, file: string, append: bool) {
     begin := !append ? 0 : shell.history_append_from_index
     if len(shell.history) > begin {
         for entry in shell.history[begin:] {
-            fmt.sbprintln(&lines, entry)
+            fmt.sbprintf(&lines, "%v\n", entry)
         }
     }
     
@@ -520,11 +520,7 @@ write_history_to_file :: proc (shell: ^Shell, file: string, append: bool) {
     }
     
     flags := os.File_Flags { .Write, .Create }
-    if !append {
-        flags += { .Trunc }
-    } else {
-        flags += { .Append }
-    }
+    flags += !append ? { .Trunc } : { .Append }
     
     handle, open_error  := os.open(file, flags); assert(open_error  == nil)
     defer { close_error := os.close(handle);     assert(close_error == nil) }
@@ -572,7 +568,7 @@ eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, outp
         }
         
         id := index + 1
-        fmt.wprintfln(output, "[%v] %v", id, command.process.pid)
+        fmt.wprintf(output, "[%v] %v\n", id, command.process.pid)
     }
 }
 
@@ -589,7 +585,7 @@ start_command_raw :: proc (shell: ^Shell, arguments: [] string, params: os.Proce
     process, start_error := os.process_start(params)
     if start_error != nil {
         command_name := arguments[0]
-        fmt.wprintfln(error, "ERROR trying to start %v: %v", command_name, start_error)
+        fmt.wprintf(error, "ERROR trying to start %v: %v\n", command_name, start_error)
     }
     
     return process
@@ -636,74 +632,71 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
             delete_string(shell.working_directory, shell.allocator)
             shell.working_directory = next
         } else {
-            fmt.wprintfln(output, "cd: %v: No such file or directory", target)
+            fmt.wprintf(output, "cd: %v: No such file or directory\n", target)
         }
     } else if is_builtin(shell, "pwd", command_name) {
-        fmt.wprintfln(output, "%v", shell.working_directory)
+        fmt.wprintf(output, "%v\n", shell.working_directory)
     } else if is_builtin(shell, "jobs", command_name) {
         reap_jobs_and_print(shell, output, show_running = true)
     } else if is_builtin(shell, "history", command_name) {
-        invalid: bool
-        last_n: Maybe(int)
-        print_history := true
+        last_n:        Maybe(int)
+        print_history: bool
         
-        if len(arguments) != 0 {
-            if len(arguments) != 1 && len(arguments) != 2 {
-                fmt.wprintfln(output, "history: invalid usage: expected 1 or 2 arguments but got %d", len(arguments))
-                invalid = true
-            } else if len(arguments) == 2 {
-                subcommand := shift(&arguments)
-                
-                print_history = false
-                file := shift(&arguments)
-                switch subcommand {
-                case "-w": write_history_to_file(shell, file, append = false)
-                case "-a": write_history_to_file(shell, file, append = true)
-                case "-r": read_history_from_file(shell, file)
-                    
-                case:
-                    fmt.wprintfln(output, "history: invalid usage: unknown subcommand got %q", subcommand)
-                    invalid = true
-                }
-            } else if len(arguments) == 1 {
-                last_n_string := shift(&arguments)
-                last_n_parsed, ok := strconv.parse_int(last_n_string)
-                if !ok {
-                    fmt.wprintfln(output, "history: invalid usage: expected first argument to be a number but got %q", last_n_string)
-                    invalid = true
-                } else {
-                    last_n = clamp(last_n_parsed, 0, len(shell.history))
-                }
+        switch len(arguments) {
+        case 0: print_history = true
+        
+        case 1:
+            last_n_string := shift(&arguments)
+            last_n_parsed, ok := strconv.parse_int(last_n_string)
+            if ok {
+                last_n = clamp(last_n_parsed, 0, len(shell.history))
+                print_history = true
+            } else {
+                fmt.wprintf(output, "history: invalid usage: expected the first argument to be a number but got %q\n", last_n_string)
             }
+            
+        case 2:
+            subcommand := shift(&arguments)
+            file := shift(&arguments)
+            
+            switch subcommand {
+            case "-w": write_history_to_file(shell, file, append = false)
+            case "-a": write_history_to_file(shell, file, append = true)
+            case "-r": read_history_from_file(shell, file)
+                
+            case:
+                fmt.wprintf(output, "history: invalid usage: unknown subcommand got %q\n", subcommand)
+            }
+            
+        case:
+            fmt.wprintf(output, "history: invalid usage: expected 1 or 2 arguments but got %d\n", len(arguments))
         }
         
-        if !invalid {
-            if print_history {
-                history: [] string
-                offset := 1
-                
-                if last_n, ok := last_n.?; ok {
-                    offset  = len(shell.history)-last_n
-                    history = shell.history[offset:]
-                } else {
-                    offset  = 1
-                    history = shell.history[0:]
-                }
-                
-                for entry, index in history {
-                    fmt.wprintfln(output, "% 4d  %v", offset + index, entry)
-                }
+        if print_history {
+            history: [] string
+            offset := 1
+            
+            if last_n, ok := last_n.?; ok {
+                offset  = len(shell.history)-last_n
+                history = shell.history[offset:]
+            } else {
+                offset  = 1
+                history = shell.history[0:]
+            }
+            
+            for entry, index in history {
+                fmt.wprintf(output, "% 4d  %v\n", offset + index, entry)
             }
         }
     } else if is_builtin(shell, "complete", command_name) {
         if len(arguments) == 0 {
-            fmt.wprintf(output, "complete <subcommand>: invalid usage, expected a subcommand\n")
+            fmt.wprintf(output, "complete <subcommand>: no subcommand specified\n")
         } else {
             argument := shift(&arguments)
             switch argument {
             case "-C":
                 if len(arguments) < 2 {
-                    fmt.wprintf(output, "complete %v <command>: invalid usage, expected a command\n", argument)
+                    fmt.wprintf(output, "complete %v <path> <command>: invalid usage\n", argument)
                 } else {
                     path    := strings.clone(shift(&arguments), shell.allocator)
                     program := strings.clone(shift(&arguments), shell.allocator)
@@ -711,7 +704,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 }
             case "-p":
                 if len(arguments) < 1 {
-                    fmt.wprintf(output, "complete %v <command>: invalid usage, expected a command\n", argument)
+                    fmt.wprintf(output, "complete %v <command>: invalid usage\n", argument)
                 } else {
                     program := shift(&arguments)
                     completer, ok := shell.completers[program]
@@ -723,7 +716,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 }
             case "-r":
                 if len(arguments) < 1 {
-                    fmt.wprintf(output, "complete %v <command>: invalid usage, expected a command\n", argument)
+                    fmt.wprintf(output, "complete %v <command>: invalid usage\n", argument)
                 } else {
                     program := shift(&arguments)
                     key, value := delete_key(&shell.completers, program)
@@ -731,12 +724,12 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                     delete(value, shell.allocator)
                 }
             case:
-                fmt.printfln("complete: unknown subcommand %q", argument)
+                fmt.wprintf(output, "complete <subcommand>: unknown subcommand %q\n", argument)
             }
         }
     } else if is_builtin(shell, "declare", command_name) {
         if len(arguments) == 0 {
-            fmt.wprintf(output, "declare <subcommand>: invalid usage, expected a subcommand\n")
+            fmt.wprintf(output, "declare <subcommand>: no subcommand specified\n")
         } else {
             if len(arguments) > 1 {
                 argument := shift(&arguments)
@@ -764,7 +757,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                         delete(value, shell.allocator)
                     }
                 case:
-                    fmt.wprintfln(output, "declare: unknown subcommand %q", argument)
+                    fmt.wprintf(output, "declare: unknown subcommand %q\n", argument)
                 }
             } else {
                 argument := shift(&arguments)
@@ -775,7 +768,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 extra: string
                 if ok && name == "" {
                     ok = false
-                    extra = " Name may not be empty."
+                    extra = "Name may not be empty."
                 }
                 if ok && cast(rune) name[0] in (~bit_set['0'..='9']{}) {
                     ok = false
@@ -787,7 +780,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                 }
                 if ok && value == "" {
                     ok = false
-                    extra = " Value may not be empty."
+                    extra = "Value may not be empty."
                 }
                 
                 if ok {
@@ -815,13 +808,13 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         }
         
         if is_builtin {
-            fmt.wprintfln(output, "%v is a shell builtin", exe_name)
+            fmt.wprintf(output, "%v is a shell builtin\n", exe_name)
         } else {
             fullpath, found := find_in_path(shell, exe_name, shell.command_allocator)
             if found {
-                fmt.wprintfln(output, "%v is %v", exe_name, fullpath)
+                fmt.wprintf(output, "%v is %v\n", exe_name, fullpath)
             } else {
-                fmt.wprintfln(output, "%v: not found", exe_name)
+                fmt.wprintf(output, "%v: not found\n", exe_name)
             }
         }
     }
@@ -907,7 +900,7 @@ reap_jobs_and_print :: proc (shell: ^Shell, output: io.Writer, show_running := f
         if show_running do print = true
         
         if print {
-            fmt.wprintfln(output, "[%v]%v  %-24s%v", id, icon, job.state, job.command_line)
+            fmt.wprintf(output, "[%v]%v  %-24s%v\n", id, icon, job.state, job.command_line)
         }
         
         if job.state == .Done {
@@ -939,7 +932,6 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
         
         before := parser.input
         peeked := parse_string(&parser)
-        
         
         switch peeked {
             // @todo dont accept more pipes or args, just more redirections and a background
@@ -976,15 +968,25 @@ parse_command :: proc (parser: ^Parser) -> Command {
         before := parser.input
         current := parse_string(parser)
         
-        switch current {
-        case "": continue loop
-        
-        case "1>", ">", "2>", "1>>", ">>", "2>>", "|", "&":
-            parser.input = before
-            break loop
+        before_dollar, ok := chop(&current, "$")
+        if ok {
+            name := current
+            assert(name != "") // @todo how can we mark this parse as failed?
+            value := parser.shell.declarations[name]
+            argument := fmt.aprintf("%v%v", before_dollar, value, allocator = parser.allocator)
+            append(&command.arguments, argument)
+        } else {
+            current = before_dollar
+            switch current {
+            case "": continue loop
+            
+            case "1>", ">", "2>", "1>>", ">>", "2>>", "|", "&":
+                parser.input = before
+                break loop
+            }
+            
+            append(&command.arguments, strings.clone(current, parser.allocator))
         }
-        
-        append(&command.arguments, strings.clone(current, parser.allocator))
     }
     
     command.is_builtin = command_is_builtin(parser.shell, command)
@@ -1035,6 +1037,8 @@ parse_string :: proc (parser: ^Parser) -> string {
     
     Flags :: bit_set[ enum {
         space_is_break,
+        dollar_is_break,
+        
         double_quote_sets,
         double_quote_ends,
         single_quote_sets,
@@ -1043,11 +1047,12 @@ parse_string :: proc (parser: ^Parser) -> string {
         
         escape_only_special,
         
+        
         // transient flags
         escape_next,
     }]
-    
-    Normal :: Flags { .space_is_break, .double_quote_sets, .single_quote_sets, .backslash_is_escape }
+    // nocheckin 
+    Normal :: Flags { .space_is_break, /* .dollar_is_break, */ .double_quote_sets, .single_quote_sets, .backslash_is_escape }
     Single :: Flags { .single_quote_ends }
     Double :: Flags { .double_quote_ends, .backslash_is_escape, .escape_only_special }
     
@@ -1073,6 +1078,7 @@ parse_string :: proc (parser: ^Parser) -> string {
             
             append_rune = true
         } else if .space_is_break      in tasks && strings.is_space(r) { break loop
+        } else if .dollar_is_break     in tasks && r == '$'            { break loop
         } else if .double_quote_sets   in tasks && r == '\"'           { tasks = Double
         } else if .double_quote_ends   in tasks && r == '\"'           { tasks = Normal
         } else if .single_quote_sets   in tasks && r == '\''           { tasks = Single
@@ -1137,7 +1143,10 @@ command_is_in_path :: proc (shell: ^Shell, error: io.Writer, command: Command) -
     
     _, result := find_in_path(shell, name, shell.command_allocator)
     if !result {
-        fmt.wprintfln(error, "%v: command not found", name)
+        if name == "" {
+            name = "<empty string>"
+        }
+        fmt.wprintf(error, "%v: command not found\n", name)
     }
     return result
 }
