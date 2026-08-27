@@ -747,6 +747,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                     } else {
                         name := shift(&arguments)
                         value, ok := shell.declarations[name]
+                        
                         if ok {
                             fmt.wprintf(output, "declare -- %v=%q\n", name, value)
                         } else {
@@ -758,7 +759,6 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                         fmt.wprintf(output, "declare %v <variable>: invalid usage, expected a variable\n", argument)
                     } else {
                         variable := shift(&arguments)
-                        // @leak key and value where cloned
                         key, value := delete_key(&shell.declarations, variable)
                         delete(key,   shell.allocator)
                         delete(value, shell.allocator)
@@ -767,14 +767,39 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                     fmt.wprintfln(output, "declare: unknown subcommand %q", argument)
                 }
             } else {
-                declaration := shift(&arguments)
+                argument := shift(&arguments)
+                declaration := argument
                 name, ok := chop(&declaration, "=")
+                value := declaration
+                
+                extra: string
+                if ok && name == "" {
+                    ok = false
+                    extra = " Name may not be empty."
+                }
+                if ok && cast(rune) name[0] in (~bit_set['0'..='9']{}) {
+                    ok = false
+                    extra = "not a valid identifier"
+                }
+                if ok && strings.contains(name, "-") {
+                    ok = false
+                    extra = "not a valid identifier"
+                }
+                if ok && value == "" {
+                    ok = false
+                    extra = " Value may not be empty."
+                }
+                
                 if ok {
-                    name  := strings.clone(name,        shell.allocator)
-                    value := strings.clone(declaration, shell.allocator)
+                    name  := strings.clone(name,  shell.allocator)
+                    value := strings.clone(value, shell.allocator)
                     shell.declarations[name] = value
                 } else {
-                    fmt.wprintf(output, "declare: <name>=<value>: expected a variable definition but got %q\n", name)
+                    fmt.wprintf(output, "declare: `%v'", argument)
+                    if extra != "" {
+                        fmt.wprintf(output, ": %v", extra)
+                    }
+                    fmt.wprintf(output, "\n")
                 }
             }
         }
