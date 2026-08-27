@@ -1155,6 +1155,8 @@ command_is_in_path :: proc (shell: ^Shell, error: io.Writer, command: Command) -
     return result
 }
 
+////////////////////////////////////////////////
+
 chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok #no_bounds_check {
     i := strings.index(s^, separator)
     
@@ -1171,8 +1173,6 @@ chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok #no_
     
     return cut, ok
 }
-
-////////////////////////////////////////////////
 
 shift :: proc (s: ^[] string) -> string {
     assert(len(s) > 0)

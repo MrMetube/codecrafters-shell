@@ -15,3 +15,9 @@ Redirection: redirect stdout and stderr, with options to create or append files.
 Background jobs: start jobs with &, list running jobs, and reap finished jobs.
 
 Pipelines: pipe a command’s stdout to the next command’s stdin and chain multiple commands in a single pipeline.
+
+Autocomplete: complete partial commands and filenames, or register programmable completion commands that receive context and return suggested matches.
+
+History: record commands, let the user recall previous commands and persist them across shell sessions.
+
+Parameter expansion: expand variables with $ and ${name} within commands.
