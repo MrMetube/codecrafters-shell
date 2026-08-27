@@ -733,8 +733,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
         } else {
             if len(arguments) > 1 {
                 argument := shift(&arguments)
-                switch argument {
-                case "-p":
+                if argument == "-p" {
                     if len(arguments) < 1 {
                         fmt.wprintf(output, "declare %v <variable>: invalid usage, expected a variable\n", argument)
                     } else {
@@ -747,16 +746,7 @@ eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer)
                             fmt.wprintf(output, "declare: %v: not found\n", name)
                         }
                     }
-                case "-r":
-                    if len(arguments) < 1 {
-                        fmt.wprintf(output, "declare %v <variable>: invalid usage, expected a variable\n", argument)
-                    } else {
-                        variable := shift(&arguments)
-                        key, value := delete_key(&shell.declarations, variable)
-                        delete(key,   shell.allocator)
-                        delete(value, shell.allocator)
-                    }
-                case:
+                } else {
                     fmt.wprintf(output, "declare: unknown subcommand %q\n", argument)
                 }
             } else {
@@ -968,25 +958,39 @@ parse_command :: proc (parser: ^Parser) -> Command {
         before := parser.input
         current := parse_string(parser)
         
-        before_dollar, ok := chop(&current, "$")
-        if ok {
-            name := current
-            assert(name != "") // @todo how can we mark this parse as failed?
-            value := parser.shell.declarations[name]
-            argument := fmt.aprintf("%v%v", before_dollar, value, allocator = parser.allocator)
-            append(&command.arguments, argument)
-        } else {
-            current = before_dollar
-            switch current {
-            case "": continue loop
+        expanded := strings.builder_make(parser.allocator)
+        
+        argument := current
+        for {
+            left, found := chop(&argument, "$")
+            fmt.sbprint(&expanded, left)
             
-            case "1>", ">", "2>", "1>>", ">>", "2>>", "|", "&":
-                parser.input = before
-                break loop
+            if !found {
+                current = strings.to_string(expanded)
+                break
             }
             
-            append(&command.arguments, strings.clone(current, parser.allocator))
+            assert(len(argument) > 0, "emtpy variable name after $")
+            
+            name: string
+            if argument[0] == '{' {
+                argument = argument[1:]
+            }
+            name = chop(&argument, "}")
+            
+            value := parser.shell.declarations[name]
+            fmt.sbprint(&expanded, value)
         }
+        
+        switch current {
+        case "": continue loop
+        
+        case "1>", ">", "2>", "1>>", ">>", "2>>", "|", "&":
+            parser.input = before
+            break loop
+        }
+        
+        append(&command.arguments, strings.clone(current, parser.allocator))
     }
     
     command.is_builtin = command_is_builtin(parser.shell, command)
@@ -1151,11 +1155,21 @@ command_is_in_path :: proc (shell: ^Shell, error: io.Writer, command: Command) -
     return result
 }
 
-chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok {
-    head, match, tail := strings.partition(s^, separator)
-    ok := match == separator
-    s^ = tail
-    return head, ok
+chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok #no_bounds_check {
+    i := strings.index(s^, separator)
+    
+    cut: string
+    if i == -1 {
+        cut = s^
+        s^  = ""
+    } else {
+        cut = s[:i]
+        s^  = s[i+len(separator):]
+    }
+    
+    ok := i != -1
+    
+    return cut, ok
 }
 
 ////////////////////////////////////////////////
