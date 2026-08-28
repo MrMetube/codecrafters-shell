@@ -49,8 +49,6 @@ Command :: struct {
     is_builtin: bool,
 }
 
-Target :: enum { Out, Err }
-
 Job :: struct {
     state:        Job_State,
     process:      os.Process,
@@ -72,8 +70,6 @@ Parser :: struct {
     
     pipeline: Pipeline,
 }
-
-Redirection_Kind :: enum { Create, Append }
 
 shell_init :: proc (shell: ^Shell) {
     shell.command_allocator = context.temp_allocator
@@ -925,34 +921,102 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
         },
     }
     
+    Flag  :: enum {
+        accept_commands,
+        accept_pipe,
+        redirect_output,
+        redirect_error,
+    }
+    Flags :: bit_set[Flag]
+    
+    Normal :: Flags { .accept_commands, .accept_pipe, .redirect_output, .redirect_error }
+    tasks := Normal
+    
+    // @todo graceful error handling
     loop: for parser.input != "" {
+        if .accept_commands not_in tasks {
+            fmt.panicf("ERROR: content after '&': %q\n", parser.input)
+        }
+        
+        // @todo inline and simplify as the default case and dont allow most specials before the first command was parsed
         command := parse_command(&parser)
         append(commands, command)
         
         before := parser.input
         peeked := parse_string(&parser)
         
-        switch peeked {
-            // @todo dont accept more pipes or args, just more redirections and a background
-        case "1>", ">":   parse_redirection(&parser, &parser.pipeline, .Create, .Out)
-        case "2>":        parse_redirection(&parser, &parser.pipeline, .Create, .Err)
-        case "1>>", ">>": parse_redirection(&parser, &parser.pipeline, .Append, .Out)
-        case "2>>":       parse_redirection(&parser, &parser.pipeline, .Append, .Err)
+        {            
+            Redirection :: bit_field u8 {
+                kind:   enum u8 { Create, Append } | 1,
+                target: enum u8 { Output, Error  } | 1,
+            } 
+
+            redirection: Redirection
+            target_flag: Flag
+            #assert(Flag{} not_in Flags { .redirect_output, .redirect_error })
             
+            switch peeked {
+            case "1>", ">":   redirection = { kind = .Create, target = .Output }; target_flag = .redirect_output
+            case "1>>", ">>": redirection = { kind = .Append, target = .Output }; target_flag = .redirect_output
+            case "2>":        redirection = { kind = .Create, target = .Error  }; target_flag = .redirect_error
+            case "2>>":       redirection = { kind = .Append, target = .Error  }; target_flag = .redirect_error
+            }
+            
+            if target_flag != {} {
+                // @note for error reporting only
+                redirection_symbol := strings.clone(peeked, shell.command_allocator)
+                target_string      := redirection.target == .Output ? "stdout" : "stderr"
+                
+                if target_flag in tasks {
+                    tasks -= { .accept_pipe, target_flag }
+                    
+                    relative_path := parse_string(&parser)
+                    if relative_path != "" {
+                        path := eval_path(parser.shell, relative_path)
+                        
+                        flags := os.File_Flags{ .Read, .Write, .Create }
+                        switch redirection.kind {
+                        case .Create: flags += { .Trunc  }
+                        case .Append: flags += { .Append }
+                        }
+                        
+                        handle, open_error := os.open(path, flags)
+                        if open_error == nil {
+                            switch redirection.target {
+                            case .Output: parser.pipeline.output = handle
+                            case .Error:  parser.pipeline.error  = handle
+                            }
+                            
+                            continue loop
+                        }
+                        
+                        fmt.panicf("ERROR: redirect %v(%v) into %q failed: %v.\n", target_string, redirection_symbol, path, os.error_string(open_error))
+                    }
+                    
+                    fmt.panicf("ERROR: redirect %v(%v) invalid: no path to specified.\n", target_string, redirection_symbol)
+                }
+                
+                fmt.panicf("ERROR: redirect %v(%v) invalid: %v was already redirected.\n", target_string, redirection_symbol, target_string)
+            }
+        }
+        
+        switch peeked {    
         case "|":
-            // continue pipeline
+            if .accept_pipe in tasks {   
+                continue loop
+            }
+            fmt.panicf("ERROR: cannot pipe a commands outputs after a redirection to a file. this is the invalid pipe: `%v %v`\n", peeked, parser.input)
             
         case "&":
+            tasks -= { .accept_commands }
             parser.pipeline.background = true
-            if parser.input != "" {
-                fmt.panicf("ERROR content after '&': `%v`\n", parser.input)
-            }
-            break loop
+            continue loop
             
         case: 
             // @note reset what was peeked
-            // @todo is anything else even valid?
             parser.input = before
+            // @todo see parse_command
+            continue loop
         }
     }
     
@@ -1021,28 +1085,6 @@ command_is_builtin :: proc (state: ^Shell, command: Command) -> bool {
     }
     
     return result
-}
-
-parse_redirection :: proc (parser: ^Parser, pipeline: ^Pipeline, kind: Redirection_Kind, target: Target) {
-    arg := parse_string(parser)
-    // @todo handle empty result
-    
-    path := eval_path(parser.shell, arg)
-    
-    flags := os.File_Flags{ .Read, .Write, .Create }
-    switch kind {
-        case .Create: flags += { .Trunc }
-        case .Append: flags += { .Append }
-    }
-    
-    // @todo handle the error
-    handle, open_error := os.open(path, flags)
-    assert(open_error == nil)
-    
-    switch target {
-        case .Out: pipeline.output = handle
-        case .Err: pipeline.error  = handle
-    }
 }
 
 parse_string :: proc (parser: ^Parser) -> string {
