@@ -1033,20 +1033,14 @@ parse_string :: proc (shell: ^Shell, parser: ^Parser, buffer, expanded: ^strings
     strings.builder_reset(expanded)
     
     Flags :: bit_set[ enum {
-        space_is_break,
-        
-        double_quote_sets,
-        double_quote_ends,
-        single_quote_sets,
-        single_quote_ends,
+        double_quote_sets, double_quote_ends,
+        single_quote_sets, single_quote_ends,
         
         backslash_is_escape,
         
-        dollar_is_expanded,
         collect_parameter,
-        brace_sets,
-        brace_ends,
-        space_ends_parameter,
+        dollar_sets, space_ends,
+        brace_sets,  brace_ends,
         
         escape_only_special,
         
@@ -1054,14 +1048,14 @@ parse_string :: proc (shell: ^Shell, parser: ^Parser, buffer, expanded: ^strings
         escape_next,
     }]
     
-    Normal :: Flags { .space_is_break, .double_quote_sets, .single_quote_sets, .backslash_is_escape, .dollar_is_expanded }
+    Normal :: Flags { .space_ends, .double_quote_sets, .single_quote_sets, .backslash_is_escape, .dollar_sets }
     Single :: Flags { .single_quote_ends }
     Double :: Flags { .double_quote_ends, .backslash_is_escape, .escape_only_special }
     
-    Dollar       :: Flags { .collect_parameter, .brace_sets, .space_ends_parameter }
+    Dollar       :: Flags { .collect_parameter, .brace_sets, .space_ends }
     DollarBraced :: Flags { .collect_parameter, .brace_ends }
     
-    tasks := Normal
+    state := Normal
     
     parser.input = strings.trim_left_space(parser.input)
     
@@ -1074,9 +1068,10 @@ parse_string :: proc (shell: ^Shell, parser: ^Parser, buffer, expanded: ^strings
         expand: bool
         and_break: bool
         
-        if .escape_next in tasks {
-            tasks -= { .escape_next }
-            if .escape_only_special in tasks {
+        // @todo how does \escaping interact with $parameters
+        if .escape_next in state {
+            state -= { .escape_next }
+            if .escape_only_special in state {
                 switch r {
                 case '"', '$', '\\', '`', '\n': append_rune = true
                 case:                           unimplemented("invalid escaped character")
@@ -1084,50 +1079,52 @@ parse_string :: proc (shell: ^Shell, parser: ^Parser, buffer, expanded: ^strings
             } else {
                 append_rune = true
             }
-        } else if .space_ends_parameter in tasks && (strings.is_space(r) || rune_index == rune_count-1) {
-            assert(.collect_parameter in tasks)
-            if rune_index == rune_count-1 {
-                strings.write_rune(expanded, r)
-            }
+        } else if .space_ends in state && strings.is_space(r) {
+            expand    = .collect_parameter in state
+            and_break = true
+        } else if .brace_ends           in state && r == '}'  { expand = true
+        } else if .dollar_sets          in state && r == '$'  { state = Dollar
+        } else if .brace_sets           in state && r == '{'  { state = DollarBraced
+        } else if .double_quote_sets    in state && r == '\"' { state = Double
+        } else if .double_quote_ends    in state && r == '\"' { state = Normal
+        } else if .single_quote_sets    in state && r == '\'' { state = Single
+        } else if .single_quote_ends    in state && r == '\'' { state = Normal
+        } else if .backslash_is_escape  in state && r == '\\' { state += { .escape_next }
+        } else if .collect_parameter    in state              { strings.write_rune(expanded, r)
+        } else                                                { append_rune = true 
+        }
+        
+        if .space_ends in state && rune_index == rune_count-1 {
             expand    = true
             and_break = true
-        } else if .brace_ends           in tasks && r == '}'            { expand = true
-        } else if .dollar_is_expanded   in tasks && r == '$'            { tasks = Dollar
-        } else if .brace_sets           in tasks && r == '{'            { tasks = DollarBraced
-        } else if .space_is_break       in tasks && strings.is_space(r) { break loop
-        } else if .double_quote_sets    in tasks && r == '\"'           { tasks = Double
-        } else if .double_quote_ends    in tasks && r == '\"'           { tasks = Normal
-        } else if .single_quote_sets    in tasks && r == '\''           { tasks = Single
-        } else if .single_quote_ends    in tasks && r == '\''           { tasks = Normal
-        } else if .backslash_is_escape  in tasks && r == '\\'           { tasks += { .escape_next }
-        } else if .collect_parameter    in tasks                        { strings.write_rune(expanded, r)
-        } else                                                          { append_rune = true 
         }
         
         if append_rune {
             strings.write_rune(buffer, r)
         } else if expand {
-            name := strings.to_string(expanded^)
+            name  := strings.to_string(expanded^)
             value := shell.declarations[name]
+            
             strings.write_string(buffer, value)
             strings.builder_reset(expanded)
-            tasks = Normal
+            
+            state = Normal
         }
         
         if and_break { break loop }
     }
     
     // @todo gracefull handle and reporting of location in command
-    if .escape_only_special in tasks || .escape_next in tasks {
+    if .escape_only_special in state || .escape_next in state {
         fmt.panicf("Incomple escape '\\'")
     }
-    switch tasks {
+    switch state {
     case Dollar:       unreachable()
     case DollarBraced: fmt.panicf("unclosed `{`")
     case Double:       fmt.panicf("unclosed `\"`")
     case Single:       fmt.panicf("unclosed `\'`")
     }
-    assert(tasks == Normal)
+    assert(state == Normal)
     
     parser.input = parser.input[eaten:]
     
