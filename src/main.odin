@@ -62,13 +62,7 @@ Job_State :: enum {
 }
 
 Parser :: struct {
-    shell: ^Shell,
-    allocator: Allocator,
-    
-    buffer: strings.Builder,
-    input:  string,
-    
-    pipeline: Pipeline,
+    input: string,
 }
 
 shell_init :: proc (shell: ^Shell) {
@@ -475,7 +469,14 @@ copy_to_buffer_s :: proc (destination: ^[dynamic] u8, source: string) { copy_to_
 as_string :: proc { as_string_array, as_string_slice }
 as_string_slice :: proc (bytes: [] u8)        -> string { return transmute(string) bytes    }
 as_string_array :: proc (bytes: [dynamic] u8) -> string { return transmute(string) bytes[:] }
-as_bytes :: proc (s: string) -> [] u8 { return transmute([] u8) s }
+as_bytes :: proc { as_bytes_string, as_bytes_struct, as_bytes_slice }
+as_bytes_string :: proc (s: string) -> [] u8 { return transmute([] u8) s }
+as_bytes_struct :: proc (s: ^$T)    -> [] u8 {
+    return transmute([] u8) runtime.Raw_Slice { data = s, len = size_of(T) }
+}
+as_bytes_slice  :: proc (s: [] $T) -> [] u8 {
+    return transmute([] u8) runtime.Raw_Slice { data = raw_data(s), len = len(S) * size_of(T) }
+}
 
 ////////////////////////////////////////////////
 
@@ -906,19 +907,17 @@ reap_jobs_and_print :: proc (shell: ^Shell, output: io.Writer, show_running := f
 
 ////////////////////////////////////////////////
 
-parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic] Command, allocator: Allocator) -> Pipeline {
+parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic] Command, parse_allocator: Allocator) -> Pipeline {
     commands := commands_buffer
+    
+    string_buffer := strings.builder_make(parse_allocator)
     parser := Parser {
-        shell = shell,
-        input = input,
-        
-        allocator = allocator,
-        buffer    = strings.builder_make(allocator),
-        
-        pipeline = {
-            output   = os.stdout,
-            error    = os.stderr,
-        },
+        input  = input,
+    }
+    
+    pipeline := Pipeline {
+        output   = os.stdout,
+        error    = os.stderr,
     }
     
     Flag  :: enum {
@@ -932,115 +931,107 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
     Normal :: Flags { .accept_commands, .accept_pipe, .redirect_output, .redirect_error }
     tasks := Normal
     
+    expanded := strings.builder_make(parse_allocator)
+    command: Command
+    command.arguments = make([dynamic] string, parse_allocator)
+    
     // @todo graceful error handling
-    loop: for parser.input != "" {
-        if .accept_commands not_in tasks {
+    parsing: for {
+        if parser.input == "" {
+            command.is_builtin = command_is_builtin(shell, command)
+            append(commands, command)
+            break parsing
+        }
+        
+        if tasks == {} {
             fmt.panicf("ERROR: content after '&': %q\n", parser.input)
         }
         
-        // @todo inline and simplify as the default case and dont allow most specials before the first command was parsed
-        command := parse_command(&parser)
-        append(commands, command)
-        
         before := parser.input
-        peeked := parse_string(&parser)
+        peeked := parse_string(&parser, &string_buffer)
         
-        {            
-            Redirection :: bit_field u8 {
-                kind:   enum u8 { Create, Append } | 1,
-                target: enum u8 { Output, Error  } | 1,
-            } 
-
-            redirection: Redirection
-            target_flag: Flag
-            #assert(Flag{} not_in Flags { .redirect_output, .redirect_error })
-            
-            switch peeked {
-            case "1>", ">":   redirection = { kind = .Create, target = .Output }; target_flag = .redirect_output
-            case "1>>", ">>": redirection = { kind = .Append, target = .Output }; target_flag = .redirect_output
-            case "2>":        redirection = { kind = .Create, target = .Error  }; target_flag = .redirect_error
-            case "2>>":       redirection = { kind = .Append, target = .Error  }; target_flag = .redirect_error
-            }
-            
-            if target_flag != {} {
-                // @note for error reporting only
-                redirection_symbol := strings.clone(peeked, shell.command_allocator)
-                target_string      := redirection.target == .Output ? "stdout" : "stderr"
-                
-                if target_flag in tasks {
-                    tasks -= { .accept_pipe, target_flag }
-                    
-                    relative_path := parse_string(&parser)
-                    if relative_path != "" {
-                        path := eval_path(parser.shell, relative_path)
-                        
-                        flags := os.File_Flags{ .Read, .Write, .Create }
-                        switch redirection.kind {
-                        case .Create: flags += { .Trunc  }
-                        case .Append: flags += { .Append }
-                        }
-                        
-                        handle, open_error := os.open(path, flags)
-                        if open_error == nil {
-                            switch redirection.target {
-                            case .Output: parser.pipeline.output = handle
-                            case .Error:  parser.pipeline.error  = handle
-                            }
-                            
-                            continue loop
-                        }
-                        
-                        fmt.panicf("ERROR: redirect %v(%v) into %q failed: %v.\n", target_string, redirection_symbol, path, os.error_string(open_error))
-                    }
-                    
-                    fmt.panicf("ERROR: redirect %v(%v) invalid: no path to specified.\n", target_string, redirection_symbol)
-                }
-                
-                fmt.panicf("ERROR: redirect %v(%v) invalid: %v was already redirected.\n", target_string, redirection_symbol, target_string)
-            }
-        }
+        Redirection :: bit_field u8 {
+            kind:   enum u8 { Create, Append } | 1,
+            target: enum u8 { Output, Error  } | 1,
+        } 
         
-        switch peeked {    
+        redirection: Redirection
+        redirect_target_flag: Flag
+        #assert(Flag{} not_in Flags { .redirect_output, .redirect_error })
+        
+        switch peeked {
         case "|":
-            if .accept_pipe in tasks {   
-                continue loop
+            if .accept_pipe in tasks {
+                command.is_builtin = command_is_builtin(shell, command)
+                append(commands, command)
+                command = { arguments = make([dynamic] string, parse_allocator) }
+                    
+                continue parsing
             }
             fmt.panicf("ERROR: cannot pipe a commands outputs after a redirection to a file. this is the invalid pipe: `%v %v`\n", peeked, parser.input)
             
         case "&":
-            tasks -= { .accept_commands }
-            parser.pipeline.background = true
-            continue loop
+            tasks = {}
+            pipeline.background = true
+            continue parsing
             
-        case: 
-            // @note reset what was peeked
-            parser.input = before
-            // @todo see parse_command
-            continue loop
+        case "1>", ">":   redirection = { kind = .Create, target = .Output }; redirect_target_flag = .redirect_output
+        case "1>>", ">>": redirection = { kind = .Append, target = .Output }; redirect_target_flag = .redirect_output
+        case "2>":        redirection = { kind = .Create, target = .Error  }; redirect_target_flag = .redirect_error
+        case "2>>":       redirection = { kind = .Append, target = .Error  }; redirect_target_flag = .redirect_error
         }
-    }
-    
-    return parser.pipeline
-}
-
-parse_command :: proc (parser: ^Parser) -> Command {
-    command: Command
-    command.arguments = make([dynamic] string, parser.allocator)
-    
-    loop: for parser.input != "" {
-        before := parser.input
-        current := parse_string(parser)
         
-        expanded := strings.builder_make(parser.allocator)
+        if redirect_target_flag != {} {
+            // @note for error reporting only
+            redirection_symbol := strings.clone(peeked, shell.command_allocator)
+            target_string      := redirection.target == .Output ? "stdout" : "stderr"
+            
+            if redirect_target_flag in tasks {
+                tasks -= { .accept_pipe, redirect_target_flag }
+                
+                relative_path := parse_string(&parser, &string_buffer)
+                if relative_path != "" {
+                    path := eval_path(shell, relative_path)
+                    
+                    flags := os.File_Flags{ .Read, .Write, .Create }
+                    switch redirection.kind {
+                    case .Create: flags += { .Trunc  }
+                    case .Append: flags += { .Append }
+                    }
+                    
+                    handle, open_error := os.open(path, flags)
+                    if open_error == nil {
+                        switch redirection.target {
+                        case .Output: pipeline.output = handle
+                        case .Error:  pipeline.error  = handle
+                        }
+                        
+                        continue parsing
+                    }
+                    
+                    fmt.panicf("ERROR: redirect %v(%v) into %q failed: %v.\n", target_string, redirection_symbol, path, os.error_string(open_error))
+                }
+                
+                fmt.panicf("ERROR: redirect %v(%v) invalid: no path to specified.\n", target_string, redirection_symbol)
+            }
+            
+            fmt.panicf("ERROR: redirect %v(%v) invalid: %v was already redirected.\n", target_string, redirection_symbol, target_string)
+        }
         
-        argument := current
-        for {
+        ////////////////////////////////////////////////
+        
+        strings.builder_reset(&expanded)
+        argument := peeked
+        variable_expanding: for {
+            // @correctness parse_string already handled escaped(\$) and we cannot distinguish them here anymore
+            // @todo parse_string already creates an interpreted string and parameter expansion should 
+            // just also be part of this and not a separate pass and copy
             left, found := chop(&argument, "$")
             fmt.sbprint(&expanded, left)
             
             if !found {
-                current = strings.to_string(expanded)
-                break
+                peeked = strings.to_string(expanded)
+                break variable_expanding
             }
             
             assert(len(argument) > 0, "emtpy variable name after $")
@@ -1051,44 +1042,21 @@ parse_command :: proc (parser: ^Parser) -> Command {
             }
             name = chop(&argument, "}")
             
-            value := parser.shell.declarations[name]
+            value := shell.declarations[name]
             fmt.sbprint(&expanded, value)
         }
         
-        switch current {
-        case "": continue loop
-        
-        case "1>", ">", "2>", "1>>", ">>", "2>>", "|", "&":
-            parser.input = before
-            break loop
-        }
-        
-        append(&command.arguments, strings.clone(current, parser.allocator))
-    }
-    
-    command.is_builtin = command_is_builtin(parser.shell, command)
-    
-    return command
-}
-
-command_is_builtin :: proc (state: ^Shell, command: Command) -> bool {
-    if len(command.arguments) == 0 do return false
-    
-    name := command.arguments[0]
-    result: bool
-    
-    for builtin in state.builtins {
-        if builtin == name {
-            result = true
-            break
+        // @note only reachable if a variable was expanded into the empty string
+        if peeked != "" {
+            append(&command.arguments, strings.clone(peeked, parse_allocator))
         }
     }
     
-    return result
+    return pipeline
 }
 
-parse_string :: proc (parser: ^Parser) -> string {
-    strings.builder_reset(&parser.buffer)
+parse_string :: proc (parser: ^Parser, buffer: ^strings.Builder) -> string {
+    strings.builder_reset(buffer)
     
     Flags :: bit_set[ enum {
         space_is_break,
@@ -1097,7 +1065,9 @@ parse_string :: proc (parser: ^Parser) -> string {
         double_quote_ends,
         single_quote_sets,
         single_quote_ends,
+        
         backslash_is_escape,
+        dollar_is_expanded,
         
         escape_only_special,
         
@@ -1106,7 +1076,7 @@ parse_string :: proc (parser: ^Parser) -> string {
         escape_next,
     }]
     
-    Normal :: Flags { .space_is_break, .double_quote_sets, .single_quote_sets, .backslash_is_escape }
+    Normal :: Flags { .space_is_break, .double_quote_sets, .single_quote_sets, .backslash_is_escape, .dollar_is_expanded }
     Single :: Flags { .single_quote_ends }
     Double :: Flags { .double_quote_ends, .backslash_is_escape, .escape_only_special }
     
@@ -1137,26 +1107,46 @@ parse_string :: proc (parser: ^Parser) -> string {
         } else if .single_quote_sets   in tasks && r == '\''           { tasks = Single
         } else if .single_quote_ends   in tasks && r == '\''           { tasks = Normal
         } else if .backslash_is_escape in tasks && r == '\\'           { tasks += { .escape_next }
+        } else if .dollar_is_expanded  in tasks && r == '$'            {
+            // unimplemented()
+            append_rune = true
         } else {
             append_rune = true
         }
         
         if append_rune {
-            strings.write_rune(&parser.buffer, r)
+            strings.write_rune(buffer, r)
         }
     }
     
     parser.input = parser.input[eaten:]
-    parser.input = strings.trim_left_space(parser.input)
     
-    result := strings.to_string(parser.buffer)
+    result := strings.to_string(buffer^)
     
     return result
 }
 
 ////////////////////////////////////////////////
 
+command_is_builtin :: proc (state: ^Shell, command: Command) -> bool {
+    if len(command.arguments) == 0 do return false
+    
+    name := command.arguments[0]
+    result: bool
+    
+    for builtin in state.builtins {
+        if builtin == name {
+            result = true
+            break
+        }
+    }
+    
+    return result
+}
+
 command_valid :: proc (shell: ^Shell, error: io.Writer, command: Command) -> bool { return command.is_builtin || command_is_in_path(shell, error, command) } 
+
+////////////////////////////////////////////////
 
 chop_PATH :: proc (path: ^string) -> string {
     path_separator :: ";" when ODIN_OS == .Windows else ":"
@@ -1173,6 +1163,7 @@ find_in_path :: proc (shell: ^Shell, target: string, allocator: Allocator) -> (s
     for path_variable != "" {
         dir_path := chop_PATH(&path_variable)
         
+        // @copypasta with matches_in_directory
         dir_info, dir_error := os.read_all_directory_by_path(dir_path, context.temp_allocator)
         if dir_error == nil {
             for info in dir_info {
@@ -1225,7 +1216,9 @@ chop :: proc (s: ^string, separator: string) -> (string, bool) #optional_ok #no_
 
 shift :: proc (s: ^[] string) -> string {
     assert(len(s) > 0)
+    
     result := s[0]
-    s^ = s[1:]
+    s^      = s[1:]
+    
     return result
 }
