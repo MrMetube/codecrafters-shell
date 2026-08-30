@@ -36,8 +36,6 @@ Shell :: struct {
 
 Pipeline :: struct {
     background: bool,
-    
-    _commands: ^[dynamic] Command,
     output: ^os.File,
     error:  ^os.File,
 }
@@ -102,11 +100,11 @@ main :: proc () {
     shell: Shell
     shell_init(&shell)
     
-    commands := make([dynamic] Command, shell.allocator)
-    
     begin_terminal_mode()
     defer end_terminal_mode()
     
+    commands := make([dynamic] Command, shell.allocator)
+    previous_commands_output := strings.builder_make(shell.allocator)
     input_buffer: [4096] u8
     for !shell.exit {
         free_all(shell.command_allocator)
@@ -124,7 +122,8 @@ main :: proc () {
             add_to_history(&shell, input_text)
         }
         
-        pipeline := parse_pipeline(&shell, input_text, &commands, shell.command_allocator)
+        pipeline, ok := parse_pipeline(&shell, input_text, &commands, shell.command_allocator)
+        if !ok { continue }
         // assert that command's arguments are not empty
         
         output := os.to_writer(pipeline.output)
@@ -146,50 +145,39 @@ main :: proc () {
             pipes := make([] Pipe, len(commands), shell.command_allocator)
             
             for index in 0..<len(commands)-1 {
-                r, w, pipe_error  := os.pipe()
+                r, w, pipe_error := os.pipe()
                 assert(pipe_error == nil)
                 pipes[index].output  = w
                 pipes[index+1].input = r
             }
+            pipes[len(pipes)-1].output = pipeline.output
             
             for &command, index in commands {
                 pipe := pipes[index]
                 
                 if command.is_builtin {
                     if index > 0 {
-                        prev    := commands[index-1]
-                        prev_output := strings.builder_make(shell.command_allocator)
-                        pipe_read_all(&prev_output, pipe.input)
-                        
-                        if !prev.is_builtin {
-                            _, _ = os.process_wait(prev.process)
-                        }
-                        
-                        append(&command.arguments, strings.clone(strings.to_string(prev_output), shell.command_allocator))
+                        strings.builder_reset(&previous_commands_output)
+                        pipe_read_all(&previous_commands_output, pipe.input)
+                        append(&command.arguments, strings.clone(strings.to_string(previous_commands_output), shell.command_allocator))
                     }
                     
-                    if index < len(pipes)-1 {
-                        // @todo just using the pipe.output causes an infinite stall/hang
-                        this_output := strings.builder_make(shell.command_allocator)
-                        eval_builtin(&shell, command, strings.to_writer(&this_output), error)
-                        os.write_string(pipe.output, strings.to_string(this_output))
-                    } else {
-                        eval_builtin(&shell, command, output, error)
-                    }
+                    eval_builtin(&shell, command, os.to_writer(pipe.output), error)
                 } else {
                     if index < len(pipes)-1 {
                         start_command(&shell, &command, { stdout = pipe.output, stdin = pipe.input }, error)
                     } else {
-                        eval_command(&shell, pipeline, &command, output, pipe.input)
+                        eval_command(&shell, pipeline, &command, pipe.output, pipe.input)
                     }
                 }
                 
-                os.close(pipe.output)
+                close_non_standart_file(pipe.input)
+                close_non_standart_file(pipe.output)
             }
         }
         
-        if pipeline.error  != os.stderr { os.close(pipeline.error)  }
-        if pipeline.output != os.stdout { os.close(pipeline.output) }
+        close_non_standart_file(pipeline.error)
+        close_non_standart_file(pipeline.output)
     }
     
     if history_file, ok := os.lookup_env("HISTFILE", context.temp_allocator); ok {
@@ -239,6 +227,7 @@ get_user_input :: proc (shell: ^Shell, reader: io.Reader, buffer: [] u8) -> stri
             }
             
             direction := cast(Escaped) escaped_character
+            // :CursorNavigation:
             
             if len(shell.history) != 0 {
                 if !shell.history_is_navigating {
@@ -528,8 +517,10 @@ write_history_to_file :: proc (shell: ^Shell, file: string, append: bool) {
 
 ////////////////////////////////////////////////
 
-eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, output: io.Writer, input: ^os.File = nil) {
-    error := os.to_writer(pipeline.error)
+eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, output, input: ^os.File) {
+    output := os.to_writer(output)
+    error  := os.to_writer(pipeline.error)
+    
     if !command_is_in_path(shell, error, command^) { return }
     
     start_command(shell, command, { stdout = pipeline.output, stderr = pipeline.error, stdin = input }, error)
@@ -540,21 +531,8 @@ eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, outp
             assert(wait_error == nil)
         }
     } else {
+        // @todo is this still true?
         // @leak pipeline's ^os.File handles
-        
-        index := -1
-        for job, job_index in shell.jobs {
-            if job.state == .Unused {
-                index = job_index
-                delete(job.command_line, shell.allocator)
-                break
-            }
-        }
-        
-        if index == -1 {
-            index = len(shell.jobs)
-            append_nothing(&shell.jobs)
-        }
         
         command_line := strings.builder_make(shell.allocator)
         fmt.sbprint(&command_line, command.arguments[0])
@@ -566,14 +544,13 @@ eval_command :: proc (shell: ^Shell, pipeline: Pipeline, command: ^Command, outp
             }
         }
         
-        job := &shell.jobs[index]
+        job, id := begin_job(shell)
         job^ = {
             state        = .Running,
             process      = command.process,
             command_line = strings.to_string(command_line),
         }
         
-        id := index + 1
         fmt.wprintf(output, "[%v] %v\n", id, command.process.pid)
     }
 }
@@ -613,6 +590,14 @@ pipe_read_all :: proc (buffer: ^strings.Builder, read_end: ^os.File) {
         case: unimplemented()
         }
     }
+}
+
+close_non_standart_file :: proc (file: ^os.File) -> os.Error {
+    result: os.Error
+    if file != os.stderr && file != os.stdout {
+        result = os.close(file)
+    }
+    return result
 }
 
 eval_builtin :: proc (shell: ^Shell, command: Command, output, error: io.Writer) {
@@ -847,6 +832,25 @@ eval_path :: proc (shell: ^Shell, target: string) -> string {
 
 ////////////////////////////////////////////////
 
+begin_job :: proc (shell: ^Shell) -> (^Job, int) {
+    index := -1
+    for job, job_index in shell.jobs {
+        if job.state == .Unused {
+            index = job_index
+            delete(job.command_line, shell.allocator)
+            break
+        }
+    }
+    
+    if index == -1 {
+        index = len(shell.jobs)
+        append_nothing(&shell.jobs)
+    }
+    
+    result := &shell.jobs[index]
+    return result, index + 1
+}
+
 reap_jobs_and_print :: proc (shell: ^Shell, output: io.Writer, show_running := false) {
     high_job_ids: [2] int
     for &job, index in shell.jobs {
@@ -907,17 +911,13 @@ reap_jobs_and_print :: proc (shell: ^Shell, output: io.Writer, show_running := f
 
 ////////////////////////////////////////////////
 
-parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic] Command, parse_allocator: Allocator) -> Pipeline {
-    commands := commands_buffer
-    
+parse_pipeline :: proc (shell: ^Shell, input: string, commands: ^[dynamic] Command, parse_allocator: Allocator) -> (Pipeline, bool) {
     string_buffer := strings.builder_make(parse_allocator)
-    parser := Parser {
-        input  = input,
-    }
+    parser := Parser { input }
     
     pipeline := Pipeline {
-        output   = os.stdout,
-        error    = os.stderr,
+        output = os.stdout,
+        error  = os.stderr,
     }
     
     Flag  :: enum {
@@ -935,7 +935,6 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
     command: Command
     command.arguments = make([dynamic] string, parse_allocator)
     
-    // @todo graceful error handling
     parsing: for {
         if parser.input == "" {
             command.is_builtin = command_is_builtin(shell, command)
@@ -944,18 +943,17 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
         }
         
         if tasks == {} {
-            fmt.panicf("ERROR: content after '&': %q\n", parser.input)
+            fmt.printf("ERROR: content after '&': %q\n", parser.input)
+            return {}, false
         }
         
+        // @todo the parsed strings may contained escaped operators(&|<>) 
+        // which are then confused for regular ones in the switch.
         before := parser.input
         peeked := parse_string(shell, &parser, &string_buffer, &expanded)
         
-        Redirection :: bit_field u8 {
-            kind:   enum u8 { Create, Append } | 1,
-            target: enum u8 { Output, Error  } | 1,
-        } 
-        
-        redirection: Redirection
+        redirection_kind:   enum { Create, Append }
+        redirection_target: enum { Output, Error  }
         redirect_target_flag: Flag
         #assert(Flag{} not_in Flags { .redirect_output, .redirect_error })
         
@@ -968,41 +966,42 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
                     
                 continue parsing
             }
-            fmt.panicf("ERROR: cannot pipe a commands outputs after a redirection to a file. this is the invalid pipe: `%v %v`\n", peeked, parser.input)
+            fmt.printf("ERROR: cannot pipe a commands outputs after a redirection to a file. this is the invalid pipe: `%v %v`\n", peeked, parser.input)
+            return {}, false
             
         case "&":
             tasks = {}
             pipeline.background = true
             continue parsing
             
-        case "1>", ">":   redirection = { kind = .Create, target = .Output }; redirect_target_flag = .redirect_output
-        case "1>>", ">>": redirection = { kind = .Append, target = .Output }; redirect_target_flag = .redirect_output
-        case "2>":        redirection = { kind = .Create, target = .Error  }; redirect_target_flag = .redirect_error
-        case "2>>":       redirection = { kind = .Append, target = .Error  }; redirect_target_flag = .redirect_error
+        case "1>",  ">":  redirection_kind = .Create; redirection_target = .Output; redirect_target_flag = .redirect_output
+        case "1>>", ">>": redirection_kind = .Append; redirection_target = .Output; redirect_target_flag = .redirect_output
+        case "2>":        redirection_kind = .Create; redirection_target = .Error;  redirect_target_flag = .redirect_error
+        case "2>>":       redirection_kind = .Append; redirection_target = .Error;  redirect_target_flag = .redirect_error
         }
         
         if redirect_target_flag != {} {
-            // @note for error reporting only
-            redirection_symbol := strings.clone(peeked, shell.command_allocator)
-            target_string      := redirection.target == .Output ? "stdout" : "stderr"
+            redirection_error: enum { None, OpenFailed, NoPath, AlreadyRedirected }
+            path: string
+            open_error: os.Error
             
             if redirect_target_flag in tasks {
                 tasks -= { .accept_pipe, redirect_target_flag }
                 
-                // @todo are expansions allowed here? probably
                 relative_path := parse_string(shell, &parser, &string_buffer, &expanded)
                 if relative_path != "" {
-                    path := eval_path(shell, relative_path)
+                    path = eval_path(shell, relative_path)
                     
                     flags := os.File_Flags{ .Read, .Write, .Create }
-                    switch redirection.kind {
+                    switch redirection_kind {
                     case .Create: flags += { .Trunc  }
                     case .Append: flags += { .Append }
                     }
                     
-                    handle, open_error := os.open(path, flags)
+                    handle: ^os.File
+                    handle, open_error = os.open(path, flags)
                     if open_error == nil {
-                        switch redirection.target {
+                        switch redirection_target {
                         case .Output: pipeline.output = handle
                         case .Error:  pipeline.error  = handle
                         }
@@ -1010,13 +1009,25 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
                         continue parsing
                     }
                     
-                    fmt.panicf("ERROR: redirect %v(%v) into %q failed: %v.\n", target_string, redirection_symbol, path, os.error_string(open_error))
+                    redirection_error = .OpenFailed
                 }
                 
-                fmt.panicf("ERROR: redirect %v(%v) invalid: no path to specified.\n", target_string, redirection_symbol)
+                redirection_error = .NoPath
             }
             
-            fmt.panicf("ERROR: redirect %v(%v) invalid: %v was already redirected.\n", target_string, redirection_symbol, target_string)
+            redirection_error = .AlreadyRedirected
+            
+            // @note for error reporting only
+            redirection_symbol := strings.clone(peeked, shell.command_allocator)
+            target_string      := redirection_target == .Output ? "stdout" : "stderr"
+            
+            switch redirection_error {
+            case .None: unreachable()
+            case .OpenFailed:        fmt.printf("ERROR: redirect %v(%v) into %q failed: %v.\n",                 target_string, redirection_symbol, path, os.error_string(open_error))
+            case .NoPath:            fmt.printf("ERROR: redirect %v(%v) invalid: no path to specified.\n",      target_string, redirection_symbol)
+            case .AlreadyRedirected: fmt.printf("ERROR: redirect %v(%v) invalid: %v was already redirected.\n", target_string, redirection_symbol, target_string)
+            }
+            return {}, false
         }
         
         // @note only reachable if a variable was expanded into the empty string
@@ -1025,7 +1036,7 @@ parse_pipeline :: proc (shell: ^Shell, input: string, commands_buffer: ^[dynamic
         }
     }
     
-    return pipeline
+    return pipeline, true
 }
 
 parse_string :: proc (shell: ^Shell, parser: ^Parser, buffer, expanded: ^strings.Builder) -> string {
